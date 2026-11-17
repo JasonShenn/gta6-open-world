@@ -1,130 +1,173 @@
-// 城市生成：道路网格 + 街区建筑 + 公园 + 路灯 + 地标。
-// 同一个种子永远生成同一座城。地标是原创虚构地点：
-// 码头（Pier）、车库（Garage）、灯塔（Lighthouse），与任务坐标一一对应。
+// Solmar Heat — the city itself: road grid, blocks, buildings, the
+// central park, the beach and marina, landmarks, and collision.
+// Everything is generated once from a fixed seed, so the map is the
+// same on every load. All names are original.
 
-import { ROAD_SPACING, ROAD_W, WORLD_H, WORLD_W } from './config.js';
-import { pick, range, rangeInt } from './random.js';
+import { WORLD, ROAD_W, SIDEWALK, V_ROADS, H_ROADS, PARK, BEACH, MARINA, PAL } from './config.js';
+import { makeRng, range, rangeInt, pick, clamp } from './rng.js';
 
-// 屋顶配色：暖色阳光城，屋顶一片一片颜色各异。
-const ROOF_COLORS = ['#c96f4a', '#d9a05b', '#7d8ba0', '#a8574f', '#b98a4e', '#5f7d6a', '#8a6f9e', '#4f7d8a'];
-// 车身配色。
-const CAR_COLORS = ['#d94f3d', '#3d7dd9', '#e8c33a', '#e8e8e8', '#3a3a3a', '#4fae62', '#c97bb8', '#e07b2e'];
-// 行人衣服配色。
-const SHIRT_COLORS = ['#e8e8e8', '#3d7dd9', '#d94f3d', '#4fae62', '#e8c33a', '#c97bb8', '#e07b2e', '#7d8ba0'];
+export const CITY_SEED = 20261118;
 
-/** 纵向道路的 x 坐标（路中心线）。 */
-export function roadXs() {
-  const xs = [];
-  for (let x = ROAD_SPACING / 2; x < WORLD_W; x += ROAD_SPACING) xs.push(x);
-  return xs;
-}
+// Named places the story and missions point at.
+export const LANDMARKS = {
+  garage: { name: "Vera's Garage", x: 500, y: 560 },        // story hub, west side
+  plaza: { name: 'Solmar Plaza', x: 1910, y: 640 },          // downtown square
+  tower: { name: 'Lumen Tower', x: 2620, y: 450 },           // forecourt in front of the glass tower, north-east
+  market: { name: 'Harbor Market', x: 2330, y: 1830 },       // stalls by the marina road
+  chopShop: { name: 'Rust & Bolt Yard', x: 2960, y: 1780 },  // mission 2 drop-off
+  pier: { name: 'Sunset Pier', x: 2450, y: 2030 },           // mission 1 pickup, marina's north edge
+  hideout: { name: 'Coral Court', x: 700, y: 1700 },         // quiet apartments, south-west
+};
 
-/** 横向道路的 y 坐标（路中心线）。 */
-export function roadYs() {
-  const ys = [];
-  for (let y = ROAD_SPACING / 2; y < WORLD_H; y += ROAD_SPACING) ys.push(y);
-  return ys;
-}
-
-/** 点是否落在任何一条道路上（含路宽）。 */
-export function onRoad(x, y) {
-  const half = ROAD_W / 2;
-  for (const rx of roadXs()) if (Math.abs(x - rx) < half) return true;
-  for (const ry of roadYs()) if (Math.abs(y - ry) < half) return true;
-  return false;
-}
-
-/** 最近的道路中心点（警察刷新的落点、车辆行驶的车道都用它）。 */
-export function nearestRoadPoint(x, y) {
-  let bestX = roadXs()[0];
-  let bestD = Infinity;
-  for (const rx of roadXs()) {
-    const d = Math.abs(x - rx);
-    if (d < bestD) {
-      bestD = d;
-      bestX = rx;
-    }
-  }
-  let bestY = roadYs()[0];
-  bestD = Infinity;
-  for (const ry of roadYs()) {
-    const d = Math.abs(y - ry);
-    if (d < bestD) {
-      bestD = d;
-      bestY = ry;
-    }
-  }
-  // 离哪条路更近就落在哪条路上。
-  return Math.abs(x - bestX) <= Math.abs(y - bestY) ? { x: bestX, y } : { x, y: bestY };
-}
-
-/** 生成整座城：建筑、公园、路灯、停车点、三个任务地标。 */
-export function createCity(random) {
-  const buildings = [];
-  const parks = [];
-  const lamps = [];
-  const trees = [];
-  const half = ROAD_W / 2;
-
-  // 每个街区（两条路之间的方块）不是楼就是公园/广场/停车场。
-  for (let bx = 0; bx < 7; bx += 1) {
-    for (let by = 0; by < 5; by += 1) {
-      const x0 = bx * ROAD_SPACING + ROAD_SPACING / 2 + half + 14;
-      const y0 = by * ROAD_SPACING + ROAD_SPACING / 2 + half + 14;
-      const x1 = (bx + 1) * ROAD_SPACING + ROAD_SPACING / 2 - half - 14;
-      const y1 = (by + 1) * ROAD_SPACING + ROAD_SPACING / 2 - half - 14;
-      const roll = random();
-      if (roll < 0.16) {
-        // 公园：绿地 + 几棵树。
-        parks.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
-        const count = rangeInt(random, 4, 8);
-        for (let i = 0; i < count; i += 1) {
-          trees.push({ x: range(random, x0 + 20, x1 - 20), y: range(random, y0 + 20, y1 - 20), r: range(random, 10, 18) });
-        }
-        continue;
-      }
-      if (roll < 0.26) {
-        // 露天停车场：空地，停几辆车（由 world 负责放车，这里只留空地）。
-        continue;
-      }
-      // 楼群：一个街区 1–3 栋楼，留出楼间小巷。
-      const lots = rangeInt(random, 1, 3);
-      for (let i = 0; i < lots; i += 1) {
-        const w = range(random, 90, Math.max(100, (x1 - x0) / lots - 24));
-        const h = range(random, 80, 190);
-        const x = range(random, x0, Math.max(x0 + 1, x1 - w));
-        const y = range(random, y0, Math.max(y0 + 1, y1 - h));
-        buildings.push({ x, y, w, h, color: pick(random, ROOF_COLORS), height: rangeInt(random, 1, 3) });
-      }
-    }
-  }
-
-  // 路灯：沿每条路每 200 左右一盏，错开在路两侧。
-  for (const rx of roadXs()) {
-    for (let y = 120; y < WORLD_H; y += 200) {
-      lamps.push({ x: rx + half + 8, y, side: 1 });
-      lamps.push({ x: rx - half - 8, y: y + 100, side: -1 });
-    }
-  }
-  for (const ry of roadYs()) {
-    for (let x = 120; x < WORLD_W; x += 200) {
-      lamps.push({ x, y: ry + half + 8, side: 1 });
-      lamps.push({ x: x + 100, y: ry - half - 8, side: -1 });
-    }
-  }
-
-  // 三个任务地标（都在路边，方便到达）。
-  const landmarks = {
-    // 码头：西南角海边，任务一接头点。
-    pier: { x: 200, y: 2280, label: '码头 Pier' },
-    // 修车行：城东，任务二逃脱终点。
-    garage: { x: 3000, y: 1000, label: '修车行 Garage' },
-    // 灯塔：东北角，任务三送货终点。
-    lighthouse: { x: 3000, y: 200, label: '灯塔 Lighthouse' },
+function blockRect(vx0, vx1, hy0, hy1) {
+  return {
+    x: vx0 + ROAD_W / 2 + SIDEWALK,
+    y: hy0 + ROAD_W / 2 + SIDEWALK,
+    w: (vx1 - vx0) - ROAD_W - SIDEWALK * 2,
+    h: (hy1 - hy0) - ROAD_W - SIDEWALK * 2,
   };
+}
 
-  // 玩家出生点：市中心偏南的十字路口边。
-  const spawn = { x: 1400, y: 1400 };
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
 
-  return { buildings, parks, lamps, trees, landmarks, spawn, carColors: CAR_COLORS, shirtColors: SHIRT_COLORS };
+export function buildCity() {
+  const rng = makeRng(CITY_SEED);
+  const buildings = [];
+  const trees = [];
+  const palms = [];
+  const boats = [];
+  const parkedCars = [];
+  const carColors = ['#d94f3d', '#3d7bd9', '#e8c33a', '#7a4fd9', '#2fae6e', '#e8e8e8', '#222831', '#e87a2a'];
+
+  // --- Buildings, one block at a time -------------------------------------
+  const vEdges = [0, ...V_ROADS, WORLD.w];
+  const hEdges = [0, ...H_ROADS, WORLD.h];
+  for (let bi = 0; bi < vEdges.length - 1; bi++) {
+    for (let bj = 0; bj < hEdges.length - 1; bj++) {
+      const block = blockRect(vEdges[bi], vEdges[bi + 1], hEdges[bj], hEdges[bj + 1]);
+      if (block.w < 60 || block.h < 60) continue;
+      // The park block stays green; the southern strip is beach/marina.
+      if (rectsOverlap(block, PARK)) continue;
+      if (block.y + block.h > BEACH.y - 40) continue;
+      // The plaza block (downtown square) stays open, with a fountain.
+      const plaza = { x: 1700, y: 470, w: 430, h: 330 };
+      if (rectsOverlap(block, plaza)) {
+        trees.push({ x: 1780, y: 540 }, { x: 2060, y: 540 }, { x: 1780, y: 730 }, { x: 2060, y: 730 });
+        continue;
+      }
+      const count = rangeInt(rng, 2, 4);
+      for (let k = 0; k < count; k++) {
+        const bw = range(rng, 90, Math.min(220, block.w * 0.62));
+        const bh = range(rng, 80, Math.min(190, block.h * 0.62));
+        const bx = range(rng, block.x + 6, block.x + block.w - bw - 6);
+        const by = range(rng, block.y + 6, block.y + block.h - bh - 6);
+        const rect = { x: bx, y: by, w: bw, h: bh };
+        if (buildings.some((b) => rectsOverlap(rect, b))) continue;
+        buildings.push({
+          ...rect,
+          roof: pick(rng, PAL.buildingRoof),
+          tall: rng() < 0.18,
+          windows: rangeInt(rng, 4, 12),
+        });
+      }
+    }
+  }
+
+  // The Lumen Tower is a fixed tall landmark, not a random roof.
+  buildings.push({ x: 2560, y: 210, w: 150, h: 190, roof: '#4a6d8c', tall: true, windows: 16, landmark: 'tower' });
+  // Vera's Garage: low wide building with a forecourt.
+  buildings.push({ x: 430, y: 470, w: 190, h: 130, roof: '#5b7fa6', tall: false, windows: 6, landmark: 'garage' });
+  // Harbor Market hall.
+  buildings.push({ x: 2260, y: 1760, w: 170, h: 120, roof: '#c96f4a', tall: false, windows: 8, landmark: 'market' });
+
+  // --- Park trees and pond ---------------------------------------------------
+  for (let i = 0; i < 46; i++) {
+    const x = range(rng, PARK.x + 20, PARK.x + PARK.w - 20);
+    const y = range(rng, PARK.y + 20, PARK.y + PARK.h - 20);
+    const pond = { x: PARK.x + PARK.w * 0.32, y: PARK.y + PARK.h * 0.3, w: 130, h: 90 };
+    if (x > pond.x - 20 && x < pond.x + pond.w + 20 && y > pond.y - 20 && y < pond.y + pond.h + 20) continue;
+    trees.push({ x, y, s: range(rng, 0.8, 1.4) });
+  }
+
+  // --- Beach palms ------------------------------------------------------------
+  for (let i = 0; i < 14; i++) {
+    palms.push({ x: range(rng, 80, BEACH.w - 60), y: range(rng, BEACH.y + 40, BEACH.y + 150), s: range(rng, 0.9, 1.3) });
+  }
+
+  // --- Marina: docks and moored boats -----------------------------------------
+  const dockYs = [2140, 2240, 2340];
+  for (const dy of dockYs) {
+    for (let i = 0; i < 3; i++) {
+      boats.push({
+        x: range(rng, 2050, 3000), y: dy + (rng() < 0.5 ? -26 : 26),
+        w: range(rng, 46, 78), h: 18, angle: 0,
+        color: pick(rng, ['#e8e8e8', '#d94f3d', '#3d7bd9', '#e8c33a']),
+      });
+    }
+  }
+
+  // --- Parked cars along the roads --------------------------------------------
+  for (const vx of V_ROADS) {
+    for (const hy of H_ROADS) {
+      if (rng() < 0.45) continue;
+      const along = range(rng, hy + 220, hy + 420);
+      parkedCars.push({
+        x: vx + ROAD_W / 2 - 16, y: clamp(along, 120, WORLD.h - 120),
+        angle: Math.PI / 2, color: pick(rng, carColors), parked: true,
+      });
+      if (rng() < 0.6) {
+        parkedCars.push({
+          x: vx - ROAD_W / 2 + 16, y: clamp(along + range(rng, 90, 200), 120, WORLD.h - 120),
+          angle: -Math.PI / 2, color: pick(rng, carColors), parked: true,
+        });
+      }
+    }
+  }
+  // The mission-2 target car: a gold sports coupe on the plaza's edge.
+  parkedCars.push({ x: 2080, y: 800, angle: 0.4, color: '#ffd23e', parked: true, targetCar: true });
+
+  // The marina water and the beach are solid obstacles for walking/driving.
+  const waterRects = [MARINA, { x: 0, y: 0, w: 0, h: 0 }];
+  const pondRect = { x: PARK.x + PARK.w * 0.32, y: PARK.y + PARK.h * 0.3, w: 130, h: 90 };
+
+  return {
+    buildings, trees, palms, boats, parkedCars, waterRects, pondRect,
+    plaza: { x: 1700, y: 470, w: 430, h: 330 },
+    // Is a world point on a road (drivable / walkable) rather than a block?
+    isOnRoad(x, y) {
+      for (const vx of V_ROADS) if (Math.abs(x - vx) < ROAD_W / 2) return true;
+      for (const hy of H_ROADS) if (Math.abs(y - hy) < ROAD_W / 2) return true;
+      return false;
+    },
+    // Nearest road centre line to a point, for traffic lane keeping.
+    nearestRoad(x, y) {
+      let best = null, bd = Infinity;
+      for (const vx of V_ROADS) { const d = Math.abs(x - vx); if (d < bd) { bd = d; best = { axis: 'v', at: vx, dist: d }; } }
+      for (const hy of H_ROADS) { const d = Math.abs(y - hy); if (d < bd) { bd = d; best = { axis: 'h', at: hy, dist: d }; } }
+      return best;
+    },
+    // All solid rectangles: buildings, water, pond.
+    solidRects() {
+      return [...buildings, MARINA, pondRect];
+    },
+    // Random sidewalk point for pedestrian spawns.
+    randomSidewalkPoint() {
+      if (rng() < 0.5) {
+        const vx = pick(rng, V_ROADS);
+        return { x: vx + (rng() < 0.5 ? -1 : 1) * (ROAD_W / 2 + 8), y: range(rng, 100, 2000) };
+      }
+      const hy = pick(rng, H_ROADS);
+      return { x: range(rng, 100, 3100), y: hy + (rng() < 0.5 ? -1 : 1) * (ROAD_W / 2 + 8) };
+    },
+    randomRoadPoint() {
+      if (rng() < 0.5) {
+        const vx = pick(rng, V_ROADS);
+        return { x: vx, y: range(rng, 120, 1980), axis: 'v' };
+      }
+      const hy = pick(rng, H_ROADS);
+      return { x: range(rng, 120, 3080), y: hy, axis: 'h' };
+    },
+  };
 }

@@ -1,12 +1,16 @@
-// 测试共用：静态服务器（只 serving game/）+ Chromium 启动。
-// 用法：import { startServer, launchBrowser } from './helpers.mjs';
+// Solmar Heat — shared Playwright harness for the tests and the
+// screenshot script: a tiny static server plus browser helpers.
+// No network is ever touched: the game is served from localhost.
 
-import { createServer } from 'node:http';
+import http from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
+
+export const GAME_DIR = fileURLToPath(new URL('../game/', import.meta.url));
+export const CHROME = process.env.CHROME_PATH ||
+  `${process.env.HOME}/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome`;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -18,66 +22,68 @@ const MIME = {
   '.jpg': 'image/jpeg',
 };
 
-const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-
-/** 起一个只 serving game/ 的静态服务器，返回 { server, port, url }。 */
-export async function startServer(port) {
-  const server = createServer(async (req, res) => {
+export function startServer() {
+  const server = http.createServer(async (req, res) => {
     try {
-      const urlPath = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname);
-      const file = join(repoRoot, 'game', urlPath === '/' ? 'index.html' : urlPath);
-      if (!file.startsWith(join(repoRoot, 'game')) || !existsSync(file)) {
-        res.writeHead(404);
-        res.end('not found');
-        return;
-      }
+      const path = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+      const file = join(GAME_DIR, path === '/' ? 'index.html' : path);
       const data = await readFile(file);
-      res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' });
+      res.writeHead(200, { 'content-type': MIME[extname(file)] || 'application/octet-stream' });
       res.end(data);
-    } catch {
-      res.writeHead(500);
-      res.end('error');
+    } catch (e) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
     }
   });
-  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
-  return { server, port, url: `http://127.0.0.1:${port}` };
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
+  });
 }
 
-/** 用已缓存的 Chromium 启动 headless 浏览器（2D canvas，不用 WebGL）。 */
 export async function launchBrowser() {
   return chromium.launch({
-    executablePath: `${process.env.HOME}/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome`,
-    headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    executablePath: CHROME,
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--autoplay-policy=no-user-gesture-required'],
   });
 }
 
-/** 收集一页的控制台报错与未捕获异常，返回数组。 */
-export function collectErrors(page) {
+// Opens the game, collects console errors / page errors / failed
+// requests, and records every network request URL for the no-network check.
+export async function newGamePage(browser, port) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   const errors = [];
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') errors.push('console: ' + msg.text());
-  });
-  page.on('pageerror', (err) => errors.push('pageerror: ' + String(err)));
-  return errors;
+  const requests = [];
+  page.on('console', (msg) => { if (msg.type() === 'error') errors.push('console: ' + msg.text()); });
+  page.on('pageerror', (err) => errors.push('pageerror: ' + err.message));
+  page.on('requestfailed', (req) => errors.push('requestfailed: ' + req.url()));
+  page.on('request', (req) => requests.push(req.url()));
+  await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: 'load' });
+  await page.waitForFunction(() => window.__solmar, null, { timeout: 10000 });
+  return { page, errors, requests };
 }
 
-/** 读游戏状态（window.__game），测试用调试口。 */
-export async function gameState(page) {
-  return page.evaluate(() => {
-    const g = window.__game;
-    if (!g) return null;
-    const s = g.state;
-    const p = s.player;
-    return {
-      screen: g.screen,
-      px: Math.round(p.x), py: Math.round(p.y),
-      hp: Math.round(p.hp), money: p.money, wanted: p.wanted,
-      inCar: !!p.car, carSpeed: p.car ? Math.round(p.car.speed) : 0,
-      missionIndex: s.mission.index, missionStage: s.mission.stage,
-      missionTimer: Math.round(s.mission.timer * 10) / 10,
-      police: s.police.length, enemies: s.enemies.length,
-      bullets: s.bullets.length, peds: s.peds.length, cars: s.cars.length,
-    };
-  });
+export async function state(page) {
+  return page.evaluate(() => window.__solmar.state());
+}
+
+export async function holdKey(page, code, ms) {
+  await page.keyboard.down(code);
+  await page.waitForTimeout(ms);
+  await page.keyboard.up(code);
+}
+
+export async function pressKey(page, code) {
+  await page.keyboard.press(code);
+  await page.waitForTimeout(120);
+}
+
+// Wait until a state predicate holds, polling the debug handle.
+export async function waitForState(page, pred, timeout = 10000, label = 'state') {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const s = await state(page);
+    if (pred(s)) return s;
+    await page.waitForTimeout(150);
+  }
+  throw new Error('timeout waiting for ' + label + '; last state: ' + JSON.stringify(await state(page)));
 }

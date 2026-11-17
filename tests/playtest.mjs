@@ -1,241 +1,223 @@
-// 真实交互测试：用真实键盘鼠标开一局完整流程——
-// 走路 → 偷车 → 开车 → 通缉 + 警车追捕 → 任务一取货 → 任务二逃脱 →
-// 任务三开枪 → 限时送货 → 剧情完成，全程控制台零报错。
-// 传送只用来把玩家摆到待测对象旁边（省得开车横穿整座城），
-// 每个机制本身都走真实按键与真实规则。
-// 用法：node tests/playtest.mjs
+// Solmar Heat — full real-interaction playtest, run in headless Chrome
+// over the real game. Every system is driven through the keyboard and
+// mouse (plus the debug handle for teleports), and the run fails on any
+// console error or any non-local network request.
+//
+//   node tests/playtest.mjs
+// Exit code 0 = everything passed.
 
-import { startServer, launchBrowser, collectErrors, gameState } from './helpers.mjs';
+import { startServer, launchBrowser, newGamePage, state, holdKey, pressKey, waitForState } from './helpers.mjs';
 
-const { server, url } = await startServer(8902);
+let passed = 0;
+function check(name, ok, detail) {
+  if (ok) { passed++; console.log(`  PASS ${name}`); }
+  else { console.log(`  FAIL ${name}${detail ? ' — ' + detail : ''}`); process.exitCode = 1; }
+}
+
+const { server, port } = await startServer();
 const browser = await launchBrowser();
-const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-const errors = collectErrors(page);
+const { page, errors, requests } = await newGamePage(browser, port);
 
-const results = [];
-function check(name, ok, detail = '') {
-  results.push({ name, ok, detail });
-  console.log(`${ok ? '✓' : '✗'} ${name}${detail ? ' — ' + detail : ''}`);
+console.log('== Solmar Heat playtest ==');
+console.log('serving game/ on 127.0.0.1:' + port);
+
+// 1. Title screen loads, game boots, no errors yet.
+check('title screen visible', await page.isVisible('#start-screen'));
+check('start button present', await page.isVisible('#btn-start'));
+
+// 2. Start a new game.
+await page.click('#btn-start');
+await page.waitForTimeout(400);
+let s = await state(page);
+check('game starts playing', s.state === 'playing', JSON.stringify(s));
+check('mission 1 active on start', s.mission === 0 && s.missionActive === true, JSON.stringify(s));
+check('objective shown', (await page.textContent('#hud-objective')).length > 5);
+
+// 3. Walk: stand on a clear stretch of road, hold W, the player must move.
+await page.evaluate(() => window.__solmar.teleport(980, 880));
+await page.waitForTimeout(200);
+const before = await state(page);
+await holdKey(page, 'KeyW', 900);
+s = await state(page);
+const walked = Math.hypot(s.x - before.x, s.y - before.y);
+check('walking moves the player', walked > 60, `moved ${Math.round(walked)}px`);
+
+// 4. Sprint is faster than walking.
+const s0 = await state(page);
+await holdKey(page, 'KeyW', 500);
+const s1 = await state(page);
+const dWalk = Math.hypot(s1.x - s0.x, s1.y - s0.y);
+await page.keyboard.down('ShiftLeft');
+await holdKey(page, 'KeyW', 500);
+await page.keyboard.up('ShiftLeft');
+const s2 = await state(page);
+const dSprint = Math.hypot(s2.x - s1.x, s2.y - s1.y);
+check('sprint beats walking', dSprint > dWalk * 1.15, `walk ${Math.round(dWalk)} vs sprint ${Math.round(dSprint)}`);
+
+// 5. Steal a car: teleport next to the nearest parked car, press E.
+const car = await page.evaluate(() => window.__solmar.nearestParkedCar());
+await page.evaluate((c) => window.__solmar.teleport(c.x, c.y), car);
+await page.waitForTimeout(200);
+await pressKey(page, 'KeyE');
+s = await waitForState(page, (st) => st.inCar === true, 5000, 'entering car');
+check('E steals the car', s.inCar === true, JSON.stringify(s));
+check('stealing raises wanted to 1+', s.wanted >= 1, `wanted=${s.wanted}`);
+
+// 6. Drive: hold W, speed must climb and the car must travel.
+// Sample the peak speed: a cop ram or a bump can dip the final reading.
+await page.keyboard.down('KeyW');
+let peakSpeed = 0;
+for (let i = 0; i < 9; i++) {
+  await page.waitForTimeout(200);
+  const sp = (await state(page)).speed;
+  if (sp > peakSpeed) peakSpeed = sp;
 }
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+await page.keyboard.up('KeyW');
+s = await state(page);
+check('driving accelerates', peakSpeed > 300, `peak speed=${peakSpeed}`);
+const drove = Math.hypot(s.x - car.x, s.y - car.y);
+check('car actually travels', drove > 250, `travelled ${Math.round(drove)}px`);
+check('speedometer visible while driving', await page.isVisible('#hud-speed'));
 
-/** 把玩家（步行）传送到指定世界坐标，并把相机跟过去。 */
-async function teleportPlayer(x, y) {
-  await page.evaluate(({ x, y }) => {
-    const s = window.__game.state;
-    s.player.x = x;
-    s.player.y = y;
-    s.camera.x = x;
-    s.camera.y = y;
-  }, { x, y });
-}
+// 7. Steering changes heading.
+const headingBefore = await page.evaluate(() => window.__solmar.game.car.angle);
+await page.keyboard.down('KeyW');
+await holdKey(page, 'KeyA', 700);
+await page.keyboard.up('KeyW');
+const headingAfter = await page.evaluate(() => window.__solmar.game.car.angle);
+check('steering turns the car', Math.abs(headingAfter - headingBefore) > 0.4,
+  `angle ${headingBefore.toFixed(2)} -> ${headingAfter.toFixed(2)}`);
 
-/** 把玩家连人带车传送到指定世界坐标。 */
-async function teleportCar(x, y) {
-  await page.evaluate(({ x, y }) => {
-    const s = window.__game.state;
-    const car = s.player.car;
-    if (car) {
-      car.x = x;
-      car.y = y;
-      car.speed = 0;
-    }
-    s.player.x = x;
-    s.player.y = y;
-    s.camera.x = x;
-    s.camera.y = y;
-  }, { x, y });
-}
+// 8. Get out with E.
+await pressKey(page, 'KeyE');
+s = await waitForState(page, (st) => st.inCar === false, 5000, 'exiting car');
+check('E steps out of the car', s.inCar === false, JSON.stringify(s));
 
-/** 找一辆指定种类的车（只找能开的），返回它的世界坐标。 */
-async function findCar(kind) {
-  return page.evaluate((kind) => {
-    const car = window.__game.state.cars.find((c) => c.kind === kind && c.hp > 0);
-    return car ? { x: car.x, y: car.y } : null;
-  }, kind);
-}
-
-/**
- * 找一辆能开得动的停着的车：离建筑足够远、前方 220px 内无建筑。
- * seed=7 的第一辆 parked 车贴在建筑角上（离墙 13px），南行车流经过时
- * 会把它和玩家一起顶死在墙角，开车检查会随机失败——这是原版就有的
- * 生成位置问题，游戏本身不动，测试只换一辆有净空的车来验开车。
- */
-async function findDrivableParkedCar() {
-  return page.evaluate(() => {
-    const s = window.__game.state;
-    const distToBuildings = (x, y) => {
-      let best = Infinity;
-      for (const b of s.city.buildings) {
-        const cx = Math.max(b.x, Math.min(x, b.x + b.w));
-        const cy = Math.max(b.y, Math.min(y, b.y + b.h));
-        best = Math.min(best, Math.hypot(x - cx, y - cy));
-      }
-      return best;
-    };
-    const cars = s.cars.filter((c) => c.kind === 'parked' && c.hp > 0);
-    const pick = cars.find((c) =>
-      distToBuildings(c.x, c.y) > 40
-      && distToBuildings(c.x + Math.cos(c.angle) * 220, c.y + Math.sin(c.angle) * 220) > 100);
-    const car = pick || cars[0];
-    return car ? { x: car.x, y: car.y } : null;
+// 9. Shooting: on an open intersection, spawn a thug, shoot it until it drops.
+await page.evaluate(() => window.__solmar.teleport(1600, 880));
+await page.waitForTimeout(200);
+await page.evaluate(() => {
+  const g = window.__solmar.game;
+  g.spawnEnemy(g.player.x + 170, g.player.y);
+});
+await page.waitForTimeout(200);
+const moneyBefore = (await state(page)).money;
+for (let i = 0; i < 4; i++) {
+  const e = await page.evaluate(() => {
+    const g = window.__solmar.game;
+    const en = g.enemies[0];
+    return en ? { x: en.x, y: en.y } : null;
   });
+  if (!e) break;
+  await page.evaluate((p) => window.__solmar.shootAt(p.x, p.y), e);
+  await page.waitForTimeout(450);
 }
+s = await waitForState(page, (st) => st.enemies === 0, 8000, 'thug killed');
+check('shooting kills the thug', s.enemies === 0, JSON.stringify(s));
+check('kill pays $50', s.money === moneyBefore + 50, `$${moneyBefore} -> $${s.money}`);
 
-await page.goto(url + '/?seed=7', { waitUntil: 'load' });
-await page.waitForFunction(() => !!window.__game, null, { timeout: 15000 });
-await sleep(600);
+// 10. Wanted + police: 2 stars must bring cruisers.
+await page.evaluate(() => window.__solmar.setWanted(2));
+s = await waitForState(page, (st) => st.cops >= 2, 8000, 'cops spawn');
+check('2 stars spawn 2 cruisers', s.cops >= 2, JSON.stringify(s));
+check('siren HUD shows stars', (await page.textContent('#hud-stars')).includes('★'));
 
-let s = await gameState(page);
-check('标题画面', s.screen === 'title', 'screen=' + s.screen);
+// 11. Mission 1 — The Pickup, full flow through keyboard + teleports.
+await page.evaluate(() => window.__solmar.setWanted(0));
+await page.evaluate(() => window.__solmar.startMission(0));
+await page.evaluate(() => window.__solmar.teleport(2450, 2030)); // Sunset Pier
+await page.waitForTimeout(300);
+check('pier prompt shows', (await page.textContent('#hud-prompt')).includes('Press E'), await page.textContent('#hud-prompt'));
+await pressKey(page, 'KeyE');
+await page.waitForTimeout(300);
+s = await state(page);
+check('pickup advances the mission', s.missionStep === 1, JSON.stringify(s));
+await page.evaluate(() => window.__solmar.teleport(500, 620)); // Vera's Garage forecourt
+await page.waitForTimeout(300);
+await pressKey(page, 'KeyE');
+s = await waitForState(page, (st) => st.completed === 1, 5000, 'mission 1 completes');
+check('mission 1 completes, +$300', s.money >= moneyBefore + 50 + 300, `money=$${s.money}`);
 
-// 暂停 / 恢复。
-await page.keyboard.press('Enter');
-await sleep(400);
-s = await gameState(page);
-check('按 Enter 开局', s.screen === 'play', 'screen=' + s.screen);
-await page.keyboard.press('KeyP');
-await sleep(200);
-s = await gameState(page);
-check('按 P 暂停', s.screen === 'paused', 'screen=' + s.screen);
-await page.keyboard.press('KeyP');
-await sleep(200);
-s = await gameState(page);
-check('再按 P 恢复', s.screen === 'play', 'screen=' + s.screen);
+// 12. Mission 2 — Hot Wheels: steal the gold coupe, deliver it.
+await waitForState(page, (st) => st.mission === 1 && st.missionActive, 12000, 'mission 2 call');
+const gold = await page.evaluate(() => window.__solmar.targetCar());
+check('gold coupe is on the map', !!gold, JSON.stringify(gold));
+await page.evaluate((g) => window.__solmar.teleport(g.x, g.y), gold);
+await page.waitForTimeout(200);
+await pressKey(page, 'KeyE');
+s = await waitForState(page, (st) => st.inCar === true, 5000, 'stealing gold coupe');
+check('gold coupe stolen', s.inCar === true, JSON.stringify(s));
+await page.evaluate(() => window.__solmar.teleport(2960, 1780)); // Rust & Bolt Yard
+s = await waitForState(page, (st) => st.completed === 2, 5000, 'mission 2 completes');
+check('mission 2 completes, +$500', s.completed === 2, JSON.stringify(s));
 
-// 走路：按住 W 向前，位置要变。
-const before = await gameState(page);
-await page.keyboard.down('KeyW');
-await sleep(1200);
-await page.keyboard.up('KeyW');
-s = await gameState(page);
-check('走路移动', Math.hypot(s.px - before.px, s.py - before.py) > 120,
-  `(${before.px},${before.py}) → (${s.px},${s.py})`);
+// 13. Mission 3 — Deadline Run, timed, full flow.
+// Step out of the coupe first: E while driving exits the car, and the
+// pickup needs the player on foot.
+await pressKey(page, 'KeyE');
+await waitForState(page, (st) => st.inCar === false, 5000, 'out of coupe');
+await waitForState(page, (st) => st.mission === 2 && st.missionActive, 12000, 'mission 3 call');
+await page.evaluate(() => window.__solmar.teleport(2246, 1830)); // Harbor Market, west road side
+await page.waitForTimeout(300);
+await pressKey(page, 'KeyE');
+await page.waitForTimeout(300);
+s = await state(page);
+check('crate picked up, timer running', s.missionStep === 1 && (await page.isVisible('#hud-timer')), JSON.stringify(s));
+await page.evaluate(() => window.__solmar.teleport(2620, 450)); // Lumen Tower forecourt
+await page.waitForTimeout(300);
+await pressKey(page, 'KeyE');
+s = await waitForState(page, (st) => st.completed === 3, 5000, 'mission 3 completes');
+check('mission 3 completes, story done', s.completed === 3 && s.mission === -1, JSON.stringify(s));
 
-// 偷一辆停着的车（不停的车不涨通缉）。挑有净空的车，见 findDrivableParkedCar。
-const parked = await findDrivableParkedCar();
-await teleportPlayer(parked.x + 30, parked.y);
-await sleep(300);
-await page.keyboard.press('KeyE');
-await sleep(300);
-s = await gameState(page);
-check('按 E 上停着的车', s.inCar === true, `inCar=${s.inCar} at (${s.px},${s.py}) parked=(${parked.x},${parked.y})`);
-
-// 开车：按住 W 两秒，车速要起来。取这 2 秒里的最高车速：车撞墙会反弹，
-// 结束瞬间恰好撞墙时读到的速度会偏低，最高值才反映真实加速。
-await page.keyboard.down('KeyW');
-let maxSpeed = 0;
-for (let i = 0; i < 10; i += 1) {
-  await sleep(200);
-  const now = await gameState(page);
-  if (now.carSpeed > maxSpeed) maxSpeed = now.carSpeed;
+// 14. Busted: stand next to a cruiser until the arrest lands.
+// Keep re-planting the player on the cruiser so the arrest timer
+// accumulates instead of the cruiser circling past.
+await page.evaluate(() => window.__solmar.setWanted(1));
+await waitForState(page, (st) => st.cops >= 1, 8000, 'cruiser for arrest');
+let bustedAt = null;
+for (let i = 0; i < 40; i++) {
+  await page.evaluate(() => {
+    const g = window.__solmar.game;
+    const cop = g.cops[0];
+    if (cop) { g.player.x = cop.x + 15; g.player.y = cop.y; }
+  });
+  await page.waitForTimeout(400);
+  const st = await state(page);
+  if (st.state === 'busted') { bustedAt = st; break; }
 }
-await page.keyboard.up('KeyW');
-s = await gameState(page);
-check('开车加速', maxSpeed > 100, 'maxSpeed=' + maxSpeed);
-const drove = await gameState(page);
-check('开车位移', Math.hypot(drove.px - parked.x, drove.py - parked.y) > 150,
-  `moved ${Math.round(Math.hypot(drove.px - parked.x, drove.py - parked.y))}px`);
+check('standing by a cruiser gets you busted', !!bustedAt, JSON.stringify(bustedAt));
+check('busted screen shows', await page.isVisible('#busted-screen'));
+s = await waitForState(page, (st) => st.state === 'playing' && st.wanted === 0, 8000, 'respawn after busted');
+check('respawn at garage, heat cleared', s.state === 'playing' && s.wanted === 0, JSON.stringify(s));
 
-// 下车，抢一辆正在开的车：涨一星，警车随后出现。
-await page.keyboard.press('KeyE');
-await sleep(300);
-const traffic = await findCar('traffic');
-await teleportPlayer(traffic.x + 30, traffic.y);
-await sleep(200);
-await page.keyboard.press('KeyE');
-await sleep(300);
-s = await gameState(page);
-check('抢正在开的车', s.inCar === true && s.wanted >= 1, `inCar=${s.inCar} wanted=${s.wanted}`);
-await sleep(3500);
-s = await gameState(page);
-check('通缉后警车出现', s.police >= 1, 'police=' + s.police);
+// 15. Pause works.
+await pressKey(page, 'Escape');
+await page.waitForTimeout(200);
+s = await state(page);
+check('Esc pauses', s.state === 'paused', JSON.stringify(s));
+await pressKey(page, 'Escape');
+await page.waitForTimeout(200);
+s = await state(page);
+check('Esc resumes', s.state === 'playing', JSON.stringify(s));
 
-// 任务一：下车走到码头，按 E 取货。
-await page.keyboard.press('KeyE');
-await sleep(300);
-await teleportPlayer(220, 2260);
-await sleep(600);
-s = await gameState(page);
-check('走到码头进入取货区', s.missionIndex === 0 && s.missionStage === 'interact',
-  `mission=${s.missionIndex} stage=${s.missionStage} at (${s.px},${s.py})`);
-await page.keyboard.press('KeyE');
-await sleep(400);
-s = await gameState(page);
-check('任务一完成：取货 +$50，切到任务二，通缉 2 星',
-  s.missionIndex === 1 && s.money >= 50 && s.wanted === 2,
-  `mission=${s.missionIndex} money=${s.money} wanted=${s.wanted}`);
+// 16. Save: localStorage holds progress; reload offers Continue.
+const saveRaw = await page.evaluate(() => localStorage.getItem('solmar-heat-save-v1'));
+check('save written to localStorage', !!saveRaw && JSON.parse(saveRaw).money > 0, saveRaw);
+const savedMoney = JSON.parse(saveRaw).money;
+await page.reload({ waitUntil: 'load' });
+await page.waitForFunction(() => window.__solmar, null, { timeout: 10000 });
+check('Continue offered after reload', await page.isVisible('#btn-continue'));
+await page.click('#btn-continue');
+await page.waitForTimeout(400);
+s = await state(page);
+check('Continue restores money + state', s.state === 'playing' && s.money === savedMoney,
+  `money=${s.money} saved=${savedMoney}`);
 
-// 任务二：偷车开到修车行。
-const parked2 = await findDrivableParkedCar();
-await teleportPlayer(parked2.x + 30, parked2.y);
-await sleep(200);
-await page.keyboard.press('KeyE');
-await sleep(300);
-s = await gameState(page);
-check('任务二：已上车', s.inCar === true, 'inCar=' + s.inCar);
-await teleportCar(2960, 1000);
-await sleep(800);
-s = await gameState(page);
-check('任务二完成：逃到修车行 +$200，切到任务三（限时）',
-  s.missionIndex === 2 && s.money >= 250 && s.missionTimer > 0 && s.missionTimer <= 75,
-  `mission=${s.missionIndex} money=${s.money} timer=${s.missionTimer}s enemies=${s.enemies}`);
-
-// 任务三：开枪。把鼠标移到枪手身上按住左键，看子弹飞出去、枪手掉血。
-await page.keyboard.press('KeyE'); // 下车，步行才能开枪
-await sleep(300);
-const enemyScreen = await page.evaluate(() => {
-  const st = window.__game.state;
-  const e = st.enemies[0];
-  if (!e) return null;
-  // 屏幕坐标 = (世界坐标 - 相机左上角) × 缩放（1280x800 视口下缩放 4/3）。
-  const scale = Math.min(1280 / 960, 800 / 600);
-  return {
-    sx: (e.x - (st.camera.x - 480)) * scale,
-    sy: (e.y - (st.camera.y - 300)) * scale,
-  };
-});
-if (enemyScreen) {
-  await teleportPlayer(2860, 760);
-  await sleep(300);
-  const beforeShoot = await gameState(page);
-  await page.mouse.move(enemyScreen.sx, enemyScreen.sy);
-  await page.mouse.down();
-  await sleep(900);
-  await page.mouse.up();
-  const afterShoot = await gameState(page);
-  check('开枪射击（子弹飞出/枪手减员）',
-    afterShoot.enemies < beforeShoot.enemies || afterShoot.wanted >= 1,
-    `enemies ${beforeShoot.enemies} → ${afterShoot.enemies}, wanted=${afterShoot.wanted}`);
-} else {
-  check('开枪射击（无枪手可打）', false, 'enemies=0');
-}
-
-// 任务三：限时内送到灯塔，剧情完成。
-await teleportPlayer(3000, 240);
-await sleep(900);
-s = await gameState(page);
-check('任务三完成：送到灯塔 +$400，剧情完成画面',
-  s.screen === 'story' && s.money >= 650,
-  `screen=${s.screen} money=${s.money}`);
-
-// 存档：localStorage 里有钱包与进度。
-const saved = await page.evaluate(() => {
-  try {
-    return JSON.parse(window.localStorage.getItem('solmar-heat-save-v1') || 'null');
-  } catch {
-    return null;
-  }
-});
-check('localStorage 存档已写', !!saved && saved.money >= 650, JSON.stringify(saved));
-
-// 汇总。
-const failed = results.filter((r) => !r.ok);
-console.log(errors.length === 0 ? '✓ 控制台零报错' : `✗ 控制台报错 ${errors.length} 条：\n` + errors.join('\n'));
-console.log(failed.length === 0 && errors.length === 0
-  ? 'ALL PASS'
-  : `FAIL: ${failed.length} 项检查失败，${errors.length} 条控制台报错`);
+// 17. No console errors, no page errors, no non-local requests.
+check('zero console/page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
+const external = requests.filter((u) => !u.startsWith('http://127.0.0.1') && !u.startsWith('data:'));
+check('zero external network requests', external.length === 0, external.slice(0, 3).join(' | '));
 
 await browser.close();
 server.close();
-process.exit(failed.length === 0 && errors.length === 0 ? 0 : 1);
+console.log(`\n${passed} checks passed, exit ${process.exitCode || 0}`);

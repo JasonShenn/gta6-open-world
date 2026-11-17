@@ -1,46 +1,106 @@
-// Solmar Heat 的全部常量：世界尺寸、道路网格、速度、通缉、任务数值。
-// 改这里就能调手感，不用翻别的模块。
+// Solmar Heat — shared tuning constants and palette.
+// A sun-soaked fictional seaside city. Nothing here comes from any
+// commercial game: every name, place and number is original.
 
-// 世界：一座 3200 x 2400 的海滨城市，道路每 400 一格。
-export const WORLD_W = 3200;
-export const WORLD_H = 2400;
-export const ROAD_SPACING = 400;
-export const ROAD_W = 96;
-export const LANE = ROAD_W / 2 - 14;
+export const WORLD = { w: 3200, h: 2400 };
 
-// 步行与驾驶的手感数值。
-export const WALK_SPEED = 210;
-export const CAR_ACCEL = 620;
-export const CAR_BRAKE = 900;
-export const CAR_REVERSE_MAX = 220;
-export const CAR_MAX_SPEED = 560;
-export const CAR_TURN = 2.6;
-export const POLICE_MAX_SPEED = 590;
+export const ROAD_W = 140; // width of every road in world pixels
+export const SIDEWALK = 22; // sidewalk strip hugging each road
 
-// 生命、金钱与通缉。
-export const PLAYER_MAX_HP = 100;
-export const BUST_FINE = 150;
-export const WANTED_DECAY_SECONDS = 18;
-export const WANTED_DECAY_STEP = 8;
+// Road centre lines (world pixels). The grid makes the city readable
+// on the minimap and gives traffic a simple network to follow.
+export const V_ROADS = [360, 980, 1600, 2220, 2840];
+export const H_ROADS = [360, 880, 1400, 1920];
 
-// 任务奖励（美元）。
-export const REWARD_PICKUP = 50;
-export const REWARD_ESCAPE = 200;
-export const REWARD_DELIVERY = 400;
-export const DELIVERY_TIME_LIMIT = 75;
+// The park occupies the block between these two roads, the marina and
+// the beach fill the whole southern strip of the map.
+export const PARK = { x: 1600 + ROAD_W / 2 + SIDEWALK, y: 880 + ROAD_W / 2 + SIDEWALK,
+  w: (2220 - 1600) - ROAD_W - SIDEWALK * 2, h: (1400 - 880) - ROAD_W - SIDEWALK * 2 };
+export const BEACH = { x: 0, y: 2060, w: 1900, h: 340 };
+export const MARINA = { x: 1900, y: 2060, w: 1300, h: 340 };
 
-// 存档键与固定步长。
-export const SAVE_KEY = 'solmar-heat-save-v1';
-export const STEP = 1 / 60;
-
-// 阳光海滨配色：暖色沥青、米色人行道、彩色屋顶、绿地公园。
-export const PALETTE = {
-  grass: '#7fae5a',
-  park: '#69a24e',
-  road: '#3a3f4a',
-  roadLine: '#e8d44f',
-  sidewalk: '#c9bda6',
-  block: '#8a7f6a',
-  water: '#3f8fb5',
-  sand: '#e6d199',
+// Player on foot.
+export const PLAYER = {
+  radius: 14,
+  walkSpeed: 235,
+  sprintSpeed: 335,
+  maxHealth: 100,
+  gunDamage: 34,
+  gunCooldown: 0.24,
+  bulletSpeed: 900,
+  interactRange: 78,
 };
+
+// Driving. Numbers tuned so a car feels fast next to walking speed
+// but still controllable through the grid's corners.
+export const CAR = {
+  radius: 20,
+  accel: 430,
+  brake: 700,
+  reverseAccel: 300,
+  maxSpeed: 560,
+  maxReverse: 190,
+  turnRate: 2.6,
+  drag: 0.55,
+};
+
+// Wanted level: 0..5 stars. Crimes and their heat.
+export const CRIME = {
+  stealCar: 1,
+  hitPedestrian: 1,
+  shootInPublic: 1,
+  maxStars: 5,
+  decaySeconds: 22, // quiet time before one star cools off
+};
+
+// Police response: how many cruisers each star level sends out.
+export function copsForStars(stars) {
+  if (stars <= 0) return 0;
+  if (stars === 1) return 1;
+  if (stars === 2) return 2;
+  if (stars === 3) return 3;
+  return 4;
+}
+export const COP = {
+  maxSpeed: 600,
+  accel: 520,
+  turnRate: 3.1,
+  ramDamage: 6,
+  arrestRange: 72,
+  arrestSeconds: 2.4,
+  spawnDistance: 650,
+  despawnDistance: 1600,
+};
+
+// Traffic and pedestrians.
+export const TRAFFIC_COUNT = 14;
+export const PED_COUNT = 26;
+export const ENEMY = { radius: 14, hp: 100, speed: 150, shootRange: 430, shootCooldown: 1.35, damage: 9 };
+
+// Money.
+export const START_MONEY = 120;
+export const BUSTED_FINE = 150;
+export const BUSTED_FINE_RATE = 0.1;
+export const KILL_REWARD = 50;
+export const MISSION_REWARDS = [300, 500, 700];
+
+// Palette: warm coastal noon.
+export const PAL = {
+  grass: '#7fae62',
+  grassDark: '#74a258',
+  sand: '#e8d39a',
+  road: '#3d3f45',
+  roadLine: '#e8e4c8',
+  sidewalk: '#b9b3a4',
+  water: '#2e7fa8',
+  waterDeep: '#256b8f',
+  park: '#69a854',
+  buildingRoof: ['#c96f4a', '#d9a441', '#5b7fa6', '#8a6fae', '#4f9d7a', '#b5546b'],
+  buildingEdge: 'rgba(0,0,0,0.28)',
+  plaza: '#cfc8b8',
+  copBlue: '#2244aa',
+  copWhite: '#f2f2f2',
+  markerGold: '#ffd23e',
+};
+
+export const SAVE_KEY = 'solmar-heat-save-v1';
