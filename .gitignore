@@ -1,4 +1,20 @@
-node_modules
+# dependencies
 node_modules/
+
+# build / submission output
 out/
-out2/
+dist/
+
+# logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/
+.idea/
+
+# environment
+.env
