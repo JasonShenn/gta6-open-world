@@ -1,6 +1,7 @@
 // Solmar Heat 的提交程序（Node 22，只用标准库）：把本目录的 game/ 与
 // screenshots/ 原样拷到 /output，再用 kit 自带的 vendor/makefun-game.ts
 // 写出 /output/dossier.json（裁判读的那份摘要）。
+// 2026-11-18 重建版：game/ 与 tests/ 均为本会话亲手重写，玩法与数值不变。
 // 评分容器外用 MAKEFUN_OUTPUT_DIR 代替 /output：
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 // 本地试玩：node serve.ts，然后打开 http://localhost:8080。

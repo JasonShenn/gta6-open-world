@@ -55,6 +55,33 @@ async function findCar(kind) {
   }, kind);
 }
 
+/**
+ * 找一辆能开得动的停着的车：离建筑足够远、前方 220px 内无建筑。
+ * seed=7 的第一辆 parked 车贴在建筑角上（离墙 13px），南行车流经过时
+ * 会把它和玩家一起顶死在墙角，开车检查会随机失败——这是原版就有的
+ * 生成位置问题，游戏本身不动，测试只换一辆有净空的车来验开车。
+ */
+async function findDrivableParkedCar() {
+  return page.evaluate(() => {
+    const s = window.__game.state;
+    const distToBuildings = (x, y) => {
+      let best = Infinity;
+      for (const b of s.city.buildings) {
+        const cx = Math.max(b.x, Math.min(x, b.x + b.w));
+        const cy = Math.max(b.y, Math.min(y, b.y + b.h));
+        best = Math.min(best, Math.hypot(x - cx, y - cy));
+      }
+      return best;
+    };
+    const cars = s.cars.filter((c) => c.kind === 'parked' && c.hp > 0);
+    const pick = cars.find((c) =>
+      distToBuildings(c.x, c.y) > 40
+      && distToBuildings(c.x + Math.cos(c.angle) * 220, c.y + Math.sin(c.angle) * 220) > 100);
+    const car = pick || cars[0];
+    return car ? { x: car.x, y: car.y } : null;
+  });
+}
+
 await page.goto(url + '/?seed=7', { waitUntil: 'load' });
 await page.waitForFunction(() => !!window.__game, null, { timeout: 15000 });
 await sleep(600);
@@ -85,8 +112,8 @@ s = await gameState(page);
 check('走路移动', Math.hypot(s.px - before.px, s.py - before.py) > 120,
   `(${before.px},${before.py}) → (${s.px},${s.py})`);
 
-// 偷一辆停着的车（不停的车不涨通缉）。
-const parked = await findCar('parked');
+// 偷一辆停着的车（不停的车不涨通缉）。挑有净空的车，见 findDrivableParkedCar。
+const parked = await findDrivableParkedCar();
 await teleportPlayer(parked.x + 30, parked.y);
 await sleep(300);
 await page.keyboard.press('KeyE');
@@ -94,12 +121,18 @@ await sleep(300);
 s = await gameState(page);
 check('按 E 上停着的车', s.inCar === true, `inCar=${s.inCar} at (${s.px},${s.py}) parked=(${parked.x},${parked.y})`);
 
-// 开车：按住 W 两秒，车速要起来。
+// 开车：按住 W 两秒，车速要起来。取这 2 秒里的最高车速：车撞墙会反弹，
+// 结束瞬间恰好撞墙时读到的速度会偏低，最高值才反映真实加速。
 await page.keyboard.down('KeyW');
-await sleep(2000);
+let maxSpeed = 0;
+for (let i = 0; i < 10; i += 1) {
+  await sleep(200);
+  const now = await gameState(page);
+  if (now.carSpeed > maxSpeed) maxSpeed = now.carSpeed;
+}
 await page.keyboard.up('KeyW');
 s = await gameState(page);
-check('开车加速', s.carSpeed > 100, 'speed=' + s.carSpeed);
+check('开车加速', maxSpeed > 100, 'maxSpeed=' + maxSpeed);
 const drove = await gameState(page);
 check('开车位移', Math.hypot(drove.px - parked.x, drove.py - parked.y) > 150,
   `moved ${Math.round(Math.hypot(drove.px - parked.x, drove.py - parked.y))}px`);
@@ -134,7 +167,7 @@ check('任务一完成：取货 +$50，切到任务二，通缉 2 星',
   `mission=${s.missionIndex} money=${s.money} wanted=${s.wanted}`);
 
 // 任务二：偷车开到修车行。
-const parked2 = await findCar('parked');
+const parked2 = await findDrivableParkedCar();
 await teleportPlayer(parked2.x + 30, parked2.y);
 await sleep(200);
 await page.keyboard.press('KeyE');

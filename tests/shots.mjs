@@ -1,7 +1,7 @@
 // 截图脚本：按 shots.json 的 4 个场景逐个打开 ?shot= 页面，
 // 等 window.__shotReady，再存成 screenshots/<name>（JPEG，质量 82）。
 // 校验：每张 ≤256 KiB，长边 ≤1280、短边 ≥480。
-// 用法：node tests/shots.mjs（需先 npm i playwright-core，见 /tmp/pw）
+// 用法：node tests/shots.mjs（需先 npm i playwright-core）
 
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
