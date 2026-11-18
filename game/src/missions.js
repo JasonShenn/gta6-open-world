@@ -1,191 +1,169 @@
-// Solmar Heat — the story: three missions for a newcomer in Solmar,
-// given over the phone by Vera, the fixer who runs the garage.
-// Rook (the player) just rolled into town with $120 and a pistol.
+// GOLDEN TIDE — missions.js
+// One job: the story — four missions for Mara, taxi side jobs and hidden cash.
+// Each mission is stages with a target circle; reaching it advances the story
+// and pays out. The HUD reads currentObjective() for its mission chip.
 
-import { LANDMARKS } from './city.js';
-import { MISSION_REWARDS } from './config.js';
+import { MISSIONS, TAXI_FARE_MIN, TAXI_FARE_MAX } from './config.js';
+import { makeCar } from './player.js';
 
-export const STORY_INTRO =
-  'You are Rook — new in Solmar, broke, and already on Vera\'s list. ' +
-  'She runs a garage on the west side and a dozen quiet errands. ' +
-  'Do the jobs, keep the cops off your back, and Solmar starts paying.';
+export function makeMissionState() {
+  return { index: 0, stage: 0, timer: 0, done: false, allDone: false, taxi: null, taxiFare: 0 };
+}
 
-// Each mission is a list of steps. A step completes when the player
-// reaches its marker (and presses E where the step asks for it).
-export const MISSIONS = [
-  {
-    id: 'pickup',
-    title: 'Mission 1 — The Pickup',
-    caller: 'Vera',
-    briefing: 'A package is waiting on Sunset Pier. Walk it back to my garage. No guns, no noise — first job, first rule.',
-    steps: [
-      { kind: 'reach', label: 'Go to Sunset Pier', x: LANDMARKS.pier.x, y: LANDMARKS.pier.y, r: 90, pressE: true, prompt: 'Press E to grab the package' },
-      { kind: 'reach', label: 'Bring the package to Vera\'s Garage', x: LANDMARKS.garage.x, y: LANDMARKS.garage.y, r: 110, pressE: true, prompt: 'Press E to hand over the package' },
-    ],
-    reward: MISSION_REWARDS[0],
-    outro: 'Clean. You move quiet, Rook. There is more where that came from.',
-  },
-  {
-    id: 'hotwheels',
-    title: 'Mission 2 — Hot Wheels',
-    caller: 'Vera',
-    briefing: 'A gold coupe is parked by Solmar Plaza. It has an owner, and the owner has friends with guns. Take the car, shake the heat, bring it to Rust & Bolt Yard.',
-    steps: [
-      { kind: 'steal', label: 'Steal the gold coupe at Solmar Plaza', x: 2080, y: 800, r: 120, prompt: 'Press E near the gold coupe to steal it' },
-      { kind: 'deliver', label: 'Deliver the coupe to Rust & Bolt Yard', x: LANDMARKS.chopShop.x, y: LANDMARKS.chopShop.y, r: 130, inCar: true, prompt: 'Drive the coupe into the yard' },
-    ],
-    reward: MISSION_REWARDS[1],
-    outro: 'The coupe is already in pieces. You drive like you mean it.',
-    spawnGuards: [{ x: 2020, y: 760 }, { x: 2140, y: 860 }],
-  },
-  {
-    id: 'deadline',
-    title: 'Mission 3 — Deadline Run',
-    caller: 'Vera',
-    briefing: 'Harbor Market has a crate for Lumen Tower. One hundred seconds, and the market crew does not like couriers. Go.',
-    steps: [
-      { kind: 'reach', label: 'Pick up the crate at Harbor Market', x: LANDMARKS.market.x, y: LANDMARKS.market.y, r: 100, pressE: true, prompt: 'Press E to grab the crate', timed: 100 },
-      { kind: 'reach', label: 'Deliver to Lumen Tower — beat the clock!', x: LANDMARKS.tower.x, y: LANDMARKS.tower.y, r: 130, pressE: true, prompt: 'Press E to drop the crate', timed: true },
-    ],
-    reward: MISSION_REWARDS[2],
-    outro: 'Ninety seconds of my life I will never get back. You are hired, Rook. Solmar is yours now.',
-    spawnGuards: [{ x: 2280, y: 1840 }, { x: 2400, y: 1760 }],
-  },
-];
+export function currentMission(world) {
+  if (world.missions.allDone) return null;
+  return MISSIONS[world.missions.index];
+}
 
-export class MissionManager {
-  constructor(game) {
-    this.game = game;
-    this.index = 0;          // which mission is active (0..2), -1 = story done
-    this.step = 0;           // step inside the active mission
-    this.active = false;     // a mission is currently running
-    this.timer = 0;          // countdown for timed missions (0 = not timed)
-    this.timerRunning = false;
-    this.completedCount = 0;
-    this.banner = null;      // { title, text, until } shown top-centre
-    this.waitingForNext = 0; // seconds until the next mission's call
-  }
+export function currentObjective(world) {
+  const m = currentMission(world);
+  if (!m) return { text: 'Free roam — explore Palmera, drive a taxi, find hidden cash.', target: null };
+  const st = m.stages[world.missions.stage];
+  return { text: m.code + ' · ' + m.title + ' — ' + st.text, target: st.target, code: m.code, title: m.title };
+}
 
-  get mission() { return this.index >= 0 && this.index < MISSIONS.length ? MISSIONS[this.index] : null; }
-  get currentStep() {
-    const m = this.mission;
-    return m && this.active ? m.steps[this.step] : null;
-  }
-
-  showBanner(title, text, seconds) {
-    this.banner = { title, text, until: this.game.time + (seconds || 6) };
-  }
-
-  startMission(i) {
-    const m = MISSIONS[i];
-    if (!m) return;
-    this.index = i;
-    this.step = 0;
-    this.active = true;
-    this.timer = 0;
-    this.timerRunning = false;
-    this.game.sounds.phone();
-    this.showBanner(m.title, `${m.caller}: “${m.briefing}”`, 8);
-    if (m.spawnGuards) {
-      for (const g of m.spawnGuards) this.game.spawnEnemy(g.x, g.y);
-    }
-    this.game.setObjective(this.currentStep ? this.currentStep.label : '');
-  }
-
-  // Called when the player fails (busted / flatlined): restart the
-  // current mission from its first step.
-  restartCurrent() {
-    if (!this.mission) return;
-    this.game.clearEnemies();
-    this.startMission(this.index);
-  }
-
-  completeMission() {
-    const m = this.mission;
-    if (!m) return;
-    this.active = false;
-    this.timerRunning = false;
-    this.completedCount++;
-    this.game.money += m.reward;
-    this.game.sounds.missionDone();
-    this.showBanner('Job done — $' + m.reward, `${m.caller}: “${m.outro}”`, 7);
-    this.game.setObjective('');
-    this.game.save();
-    if (this.index + 1 < MISSIONS.length) {
-      this.waitingForNext = 4;
+function advanceStage(world) {
+  const ms = world.missions; const m = MISSIONS[ms.index];
+  ms.stage += 1;
+  if (ms.stage >= m.stages.length) {
+    world.money += m.reward;
+    world.toast(m.code + ' COMPLETE — Mara pays $' + m.reward, '#7be382');
+    world.sounds.missionDone();
+    ms.index += 1; ms.stage = 0; ms.timer = 0;
+    if (ms.index >= MISSIONS.length) {
+      ms.allDone = true; world.mode = 'complete';
+      world.sounds.missionDone();
     } else {
-      this.index = -1;
-      this.showBanner('Solmar is yours', 'All three jobs done. Free roam — press R at the garage to replay the story.', 9);
+      const next = MISSIONS[ms.index];
+      world.banner = { title: next.code + ' — ' + next.title, sub: next.brief, t: 5 };
+    }
+  } else {
+    world.sounds.pickup();
+  }
+}
+
+export function updateMissions(world, dt) {
+  const ms = world.missions;
+  // M4 countdown once the van stage starts.
+  const m = currentMission(world);
+  if (m && m.timeLimit && ms.stage === 1) {
+    ms.timer += dt;
+    if (ms.timer > m.timeLimit) {
+      world.toast('Too slow — the airport run failed. Try again from the garage.', '#ff5f5f');
+      ms.stage = 0; ms.timer = 0;
+      world.player.x = 1300; world.player.y = 2900;
+      if (world.player.car) { world.player.car = null; world.player.onFoot = true; }
     }
   }
+  if (!m) { updateTaxi(world, dt); updateCash(world); return; }
 
-  failTimed() {
-    this.game.sounds.busted();
-    this.showBanner('Too slow', 'The crate missed its window. Vera is not happy — try again.', 6);
-    this.restartCurrent();
+  const st = m.stages[ms.stage];
+  const p = world.player;
+  const d = Math.hypot(p.x - st.target.x, p.y - st.target.y);
+
+  // M2 stage 0 needs the actual steal, not just standing near the car.
+  if (m.id === 'm2' && ms.stage === 0) {
+    if (p.car && p.car.type === 'sports' && p.car.owned) advanceStage(world);
+    return;
   }
-
-  update(dt) {
-    const g = this.game;
-    if (this.banner && g.time > this.banner.until) this.banner = null;
-    if (this.waitingForNext > 0) {
-      this.waitingForNext -= dt;
-      if (this.waitingForNext <= 0) this.startMission(this.index + 1);
-      return;
+  // M3 stage 0 needs the crew beaten and the bag grabbed.
+  if (m.id === 'm3' && ms.stage === 0) {
+    if (world.gunmen.length > 0 && world.gunmen.every((g) => g.dead) && d < st.target.r) {
+      world.money += 200; world.toast('Cash bag grabbed — +$200', '#7be382');
+      advanceStage(world);
     }
-    if (!this.active || !this.mission) return;
-    const step = this.currentStep;
-    if (!step) return;
+    return;
+  }
+  // M4 stage 0 needs the player inside the van.
+  if (m.id === 'm4' && ms.stage === 0) {
+    if (p.car && p.car.type === 'van') advanceStage(world);
+    return;
+  }
+  if (d < st.target.r) advanceStage(world);
 
-    // Timed missions: the clock starts on the first step and runs
-    // through the whole mission.
-    if (step.timed === true || (typeof step.timed === 'number')) {
-      if (!this.timerRunning) {
-        this.timer = typeof step.timed === 'number' ? step.timed : this.timer;
-        this.timerRunning = true;
-      }
-      this.timer -= dt;
-      if (this.timer <= 0) { this.failTimed(); return; }
-    }
+  updateTaxi(world, dt);
+  updateCash(world);
+}
 
-    const px = g.player.x, py = g.player.y;
-    const d = Math.hypot(px - step.x, py - step.y);
+// Taxi side jobs: drive a cab, a fare marker appears, pick up, drop off, get paid.
+export function updateTaxi(world, dt) {
+  const ms = world.missions; const p = world.player;
+  if (!ms.taxi) {
+    if (p.car && p.car.type === 'taxi' && Math.random() < dt * 0.25) {
+      const spots = [{ x: 2220, y: 920 }, { x: 2820, y: 1920 }, { x: 1620, y: 2920 }, { x: 4020, y: 1420 }, { x: 1020, y: 2420 }];
+      const s = spots[Math.floor(Math.random() * spots.length)];
+      ms.taxi = { phase: 'pickup', x: s.x, y: s.y, fare: 0 };
+      world.toast('Taxi fare waiting — pick up the passenger.', '#ffd34d');
+    }
+    return;
+  }
+  const t = ms.taxi;
+  const d = Math.hypot(p.x - t.x, p.y - t.y);
+  if (t.phase === 'pickup' && d < 70) {
+    t.phase = 'drop';
+    const dests = [{ x: 2820, y: 420 }, { x: 4620, y: 2420 }, { x: 1300, y: 3150 }, { x: 2220, y: 3420 }];
+    const s = dests[Math.floor(Math.random() * dests.length)];
+    t.x = s.x; t.y = s.y;
+    t.fare = TAXI_FARE_MIN + Math.floor(Math.random() * (TAXI_FARE_MAX - TAXI_FARE_MIN));
+    world.toast('Passenger aboard — drive to the drop-off.', '#ffd34d');
+  } else if (t.phase === 'drop' && d < 80) {
+    world.money += t.fare;
+    world.toast('Fare complete — +$' + t.fare, '#7be382');
+    world.sounds.cash();
+    ms.taxi = null;
+  }
+  if (!p.car || p.car.type !== 'taxi') ms.taxi = null;
+}
 
-    if (step.kind === 'steal') {
-      // Complete when the player is sitting in the gold target car.
-      if (g.inCar && g.car && g.car.targetCar) this.advance();
-      return;
-    }
-    if (step.kind === 'deliver') {
-      if (d < step.r && g.inCar && g.car && g.car.targetCar) this.advance();
-      return;
-    }
-    // 'reach' steps: stand in the ring, press E where asked.
-    if (d < step.r) {
-      if (step.pressE) {
-        g.setPrompt(step.prompt);
-        if (g.input.pressed('KeyE')) this.advance();
-      } else {
-        this.advance();
-      }
+// Hidden cash: walk or drive over a glowing stash to collect $50.
+export function updateCash(world) {
+  const p = world.player;
+  for (const s of world.city.cashSpots) {
+    if (!s.taken && Math.hypot(p.x - s.x, p.y - s.y) < 42) {
+      s.taken = true; world.money += 50; world.cashFound += 1;
+      world.toast('Hidden cash found — +$50 (' + world.cashFound + '/5)', '#7be382');
+      world.sounds.cash();
     }
   }
+}
 
-  advance() {
-    const g = this.game;
-    g.sounds.pickup();
-    this.step++;
-    const m = this.mission;
-    if (this.step >= m.steps.length) {
-      this.completeMission();
-    } else {
-      g.setObjective(this.currentStep.label);
-    }
+// Spawn the story cars: the orange convertible for M2 and the getaway van for M4.
+export function ensureMissionCars(world) {
+  const ms = world.missions;
+  if (ms.index === 1 && !world.cars.some((c) => c.story === 'convertible')) {
+    const car = makeCar('sports', 560, 2100, Math.PI / 2, { color: '#ff7a1a' });
+    car.story = 'convertible'; world.cars.push(car);
   }
+  if (ms.index === 3 && !world.cars.some((c) => c.story === 'van')) {
+    const car = makeCar('van', 1300, 2980, 0);
+    car.story = 'van'; world.cars.push(car);
+  }
+}
 
-  // Marker the HUD/minimap draw for the current step (null when idle).
-  marker() {
-    const s = this.currentStep;
-    return s ? { x: s.x, y: s.y, r: s.r, label: s.label } : null;
+// M3 gunmen: three pier crew members who shoot at the player until beaten.
+export function ensureGunmen(world) {
+  if (world.missions.index !== 2) return;
+  if (world.gunmen.length === 0) {
+    world.gunmen = [
+      { x: 300, y: 2280, hp: 100, dead: false, cd: 0 },
+      { x: 380, y: 2420, hp: 100, dead: false, cd: 1 },
+      { x: 250, y: 2440, hp: 100, dead: false, cd: 2 },
+    ];
+    world.banner = { title: 'M3 — PIER SHOOTOUT', sub: 'Take down the pier crew, then grab the cash bag.', t: 5 };
+  }
+}
+
+export function updateGunmen(world, dt) {
+  const p = world.player;
+  for (const g of world.gunmen) {
+    if (g.dead) continue;
+    g.cd -= dt;
+    const d = Math.hypot(p.x - g.x, p.y - g.y);
+    if (d < 520 && g.cd <= 0) {
+      g.cd = 1.1 + Math.random() * 0.7;
+      const a = Math.atan2(p.y - g.y, p.x - g.x) + (Math.random() - 0.5) * 0.2;
+      world.bullets.push({ x: g.x, y: g.y, vx: Math.cos(a) * 620, vy: Math.sin(a) * 620, life: 0.9, fromPlayer: false });
+      world.sounds.shoot();
+    }
   }
 }

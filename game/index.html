@@ -3,161 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Solmar Heat — a 2D open-world crime game</title>
-<link rel="icon" href="data:,">
+<title>GOLDEN TIDE — a sun-soaked open-world crime game in Palmera</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23ffd34d'/%3E%3C/svg%3E">
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: #1a2b1e;
-    font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: #fff; }
-  #game-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
-
-  /* ---- HUD ---- */
-  #hud { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
-  .hidden { display: none !important; }
-  .panel { background: rgba(10, 16, 12, 0.62); border: 1px solid rgba(255,255,255,0.16);
-    border-radius: 10px; backdrop-filter: blur(4px); }
-
-  #hud-stats { position: absolute; top: 14px; left: 14px; padding: 10px 14px; min-width: 190px; }
-  #hud-money { font-size: 26px; font-weight: 800; color: #7dff9a; letter-spacing: 0.5px; }
-  #hud-health-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
-  #hud-health-bar { flex: 1; height: 10px; background: rgba(255,255,255,0.18); border-radius: 5px; overflow: hidden; }
-  #hud-health-fill { height: 100%; width: 100%; background: linear-gradient(90deg, #ff5b4d, #ff9a3d); transition: width 0.2s; }
-  #hud-health-text { font-size: 12px; color: #ffd9d4; white-space: nowrap; }
-
-  #hud-stars { position: absolute; top: 14px; right: 14px; padding: 8px 14px; font-size: 26px;
-    letter-spacing: 4px; color: #ffd23e; text-shadow: 0 2px 6px rgba(0,0,0,0.6); }
-  #hud-stars.hot { animation: pulse 0.8s infinite; }
-  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
-
-  #hud-objective { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
-    padding: 8px 18px; font-size: 15px; font-weight: 600; color: #ffe9a8; max-width: 46vw; text-align: center; }
-  #hud-objective::before { content: "◆ "; color: #ffd23e; }
-
-  #hud-banner { position: absolute; top: 64px; left: 50%; transform: translateX(-50%);
-    padding: 12px 22px; max-width: 620px; text-align: center; }
-  #hud-banner-title { font-size: 19px; font-weight: 800; color: #ffd23e; }
-  #hud-banner-text { font-size: 14px; color: #e8e8e8; margin-top: 4px; line-height: 1.45; }
-
-  #hud-timer { position: absolute; top: 120px; left: 50%; transform: translateX(-50%);
-    padding: 6px 16px; font-size: 22px; font-weight: 800; color: #7dff9a; }
-  #hud-timer.urgent { color: #ff5b4d; animation: pulse 0.5s infinite; }
-
-  #hud-speed { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
-    padding: 8px 20px; font-size: 24px; font-weight: 800; color: #fff; }
-  #hud-prompt { position: absolute; bottom: 76px; left: 50%; transform: translateX(-50%);
-    padding: 7px 16px; font-size: 15px; font-weight: 600; color: #fff; }
-  #hud-toast { position: absolute; bottom: 130px; left: 50%; transform: translateX(-50%);
-    padding: 8px 18px; font-size: 15px; font-weight: 700; color: #ffe9a8; }
-
-  #hud-controls { position: absolute; bottom: 14px; left: 14px; padding: 8px 12px;
-    font-size: 12px; line-height: 1.6; color: #cfd8cc; }
-  #hud-controls b { color: #ffd23e; }
-
-  #minimap-wrap { position: absolute; bottom: 14px; right: 14px; padding: 6px; }
-  #minimap-wrap .mm-label { font-size: 11px; letter-spacing: 2px; color: #cfd8cc; text-align: center; margin-bottom: 3px; }
-  #minimap { display: block; width: 220px; height: 165px; border-radius: 6px; }
-
-  /* ---- Full-screen overlays ---- */
-  .overlay { position: absolute; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
-    background: linear-gradient(160deg, rgba(8,20,30,0.88), rgba(40,20,10,0.82)); }
-  .card { max-width: 640px; width: calc(100% - 48px); padding: 34px 38px; text-align: center;
-    background: rgba(12, 22, 18, 0.78); border: 1px solid rgba(255,210,62,0.35); border-radius: 18px;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
-  .card h1 { font-size: 58px; font-weight: 900; letter-spacing: 2px; color: #ffd23e;
-    text-shadow: 0 4px 0 #b3541e, 0 8px 24px rgba(0,0,0,0.6); }
-  .card h2 { font-size: 15px; letter-spacing: 5px; color: #7dff9a; margin: 6px 0 18px; text-transform: uppercase; }
-  .card p { font-size: 15px; line-height: 1.6; color: #e8e8e8; margin-bottom: 14px; text-align: left; }
-  .card p.center { text-align: center; }
-  .controls-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 18px; text-align: left;
-    font-size: 13.5px; line-height: 1.9; color: #cfd8cc; margin: 6px 0 20px; }
-  .controls-grid b { color: #ffd23e; display: inline-block; min-width: 92px; }
-  .btn { pointer-events: auto; cursor: pointer; border: none; border-radius: 10px; padding: 13px 34px;
-    font-size: 18px; font-weight: 800; letter-spacing: 1px; color: #201400;
-    background: linear-gradient(180deg, #ffd23e, #f0a832); box-shadow: 0 4px 0 #b3541e; margin: 4px 6px; }
-  .btn:hover { filter: brightness(1.08); }
-  .btn:active { transform: translateY(2px); box-shadow: 0 2px 0 #b3541e; }
-  .btn.ghost { background: rgba(255,255,255,0.14); color: #fff; box-shadow: none; border: 1px solid rgba(255,255,255,0.35); }
-  #busted-screen .card h1, #wasted-screen .card h1 { color: #ff5b4d; text-shadow: 0 4px 0 #7a1208, 0 8px 24px rgba(0,0,0,0.6); }
-  .fine { font-size: 20px; font-weight: 700; color: #ffd23e; }
+  /* GOLDEN TIDE — index.html: one job, the page shell. Full-window dark stage,
+     a 1280x720 canvas centred, nothing loaded from the network. */
+  html, body { margin: 0; padding: 0; height: 100%; background: #17100a; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  #game {
+    width: min(100vw, calc(100vh * 16 / 9));
+    height: min(100vh, calc(100vw * 9 / 16));
+    display: block; background: #8fae5a; cursor: crosshair;
+    box-shadow: 0 0 60px rgba(255, 170, 60, 0.25);
+  }
 </style>
 </head>
 <body>
-<canvas id="game-canvas"></canvas>
-
-<div id="hud">
-  <div id="hud-stats" class="panel">
-    <div id="hud-money">$120</div>
-    <div id="hud-health-row">
-      <div id="hud-health-bar"><div id="hud-health-fill"></div></div>
-      <span id="hud-health-text">100 HP</span>
-    </div>
-  </div>
-  <div id="hud-stars" class="panel">☆☆☆☆☆</div>
-  <div id="hud-objective" class="panel">Talk to Vera — Mission 1 is waiting at the garage.</div>
-  <div id="hud-banner" class="panel hidden">
-    <div id="hud-banner-title"></div>
-    <div id="hud-banner-text"></div>
-  </div>
-  <div id="hud-timer" class="panel hidden"></div>
-  <div id="hud-speed" class="panel hidden">0 mph</div>
-  <div id="hud-prompt" class="panel hidden"></div>
-  <div id="hud-toast" class="panel hidden"></div>
-  <div id="hud-controls" class="panel">
-    <b>WASD</b> move / drive &nbsp; <b>E</b> steal car / get out<br>
-    <b>Mouse / Space</b> shoot &nbsp; <b>Shift</b> sprint<br>
-    <b>Esc / P</b> pause &nbsp; <b>M</b> mute
-  </div>
-  <div id="minimap-wrap" class="panel">
-    <div class="mm-label">SOLMAR · MINIMAP</div>
-    <canvas id="minimap" width="220" height="165"></canvas>
-  </div>
-</div>
-
-<div id="start-screen" class="overlay">
-  <div class="card">
-    <h1>SOLMAR HEAT</h1>
-    <h2>A 2D open-world crime game</h2>
-    <p id="story-intro"></p>
-    <div class="controls-grid">
-      <div><b>WASD / Arrows</b> walk &amp; drive</div>
-      <div><b>E</b> steal a car / get out</div>
-      <div><b>Mouse / Space</b> aim &amp; shoot</div>
-      <div><b>Shift</b> sprint on foot</div>
-      <div><b>Esc / P</b> pause the game</div>
-      <div><b>M</b> mute the sound</div>
-    </div>
-    <p class="center">Steal cars, dodge the Solmar PD, run Vera's jobs — and try not to get busted.</p>
-    <button id="btn-start" class="btn">▶ START NEW GAME</button>
-    <button id="btn-continue" class="btn ghost hidden">↻ CONTINUE</button>
-  </div>
-</div>
-
-<div id="pause-screen" class="overlay hidden">
-  <div class="card">
-    <h1 style="font-size:42px">PAUSED</h1>
-    <p class="center">Solmar waits for no one. Well — right now it does.</p>
-    <button id="btn-resume" class="btn">▶ RESUME</button>
-    <button id="btn-quit-title" class="btn ghost">TITLE SCREEN</button>
-  </div>
-</div>
-
-<div id="busted-screen" class="overlay hidden">
-  <div class="card">
-    <h1>BUSTED</h1>
-    <p class="center">The Solmar PD caught up with you.</p>
-    <p class="center fine" id="busted-fine">Fine paid: $150</p>
-    <p class="center">You wake up at Vera's Garage. The current job starts over.</p>
-  </div>
-</div>
-
-<div id="wasted-screen" class="overlay hidden">
-  <div class="card">
-    <h1>FLATLINED</h1>
-    <p class="center">Solmar chewed you up and spat you out.</p>
-    <p class="center">You wake up at Vera's Garage, $100 lighter. The current job starts over.</p>
-  </div>
-</div>
-
+<canvas id="game" width="1280" height="720"></canvas>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

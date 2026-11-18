@@ -1,106 +1,69 @@
-// Solmar Heat — bootstrap: wire the canvas, HUD and menus to the Game,
-// run the frame loop, and expose a small debug handle the automated
-// tests (and only the tests) drive.
+// GOLDEN TIDE — main.js
+// One job: boot the game — canvas, the frame loop, title clicks, pause and
+// mute keys, and the ?shot=… staging hook the screenshot driver uses.
 
 import { Game } from './game.js';
-import { STORY_INTRO } from './missions.js';
+import { Input } from './input.js';
+import { renderWorld, renderHUD, renderOverlay } from './render.js';
 
-const canvas = document.getElementById('game-canvas');
-const minimap = document.getElementById('minimap');
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const params = new URLSearchParams(window.location.search);
+const seed = Number(params.get('seed') || 7);
+const shot = params.get('shot');
 
-const hud = {
-  money: document.getElementById('hud-money'),
-  healthFill: document.getElementById('hud-health-fill'),
-  healthText: document.getElementById('hud-health-text'),
-  stars: document.getElementById('hud-stars'),
-  objective: document.getElementById('hud-objective'),
-  banner: document.getElementById('hud-banner'),
-  bannerTitle: document.getElementById('hud-banner-title'),
-  bannerText: document.getElementById('hud-banner-text'),
-  speed: document.getElementById('hud-speed'),
-  prompt: document.getElementById('hud-prompt'),
-  timer: document.getElementById('hud-timer'),
-  toast: document.getElementById('hud-toast'),
-};
+const game = new Game(seed);
+const input = new Input(canvas);
+window.GT = game; // play-test hook: the driver reads and steers the game here
 
-const game = new Game(canvas, minimap, hud);
-document.getElementById('story-intro').textContent = STORY_INTRO;
-
-// The Continue button only shows when a save exists.
-const save = game.loadSave();
-const continueBtn = document.getElementById('btn-continue');
-if (save) {
-  continueBtn.classList.remove('hidden');
-  continueBtn.textContent = `↻ CONTINUE — $${save.money} · Job ${Math.min(3, (save.completedCount || 0) + 1)}/3`;
-}
-
-document.getElementById('btn-start').addEventListener('click', () => game.startGame(true));
-continueBtn.addEventListener('click', () => {
-  const s = game.loadSave();
-  if (s) game.applySave(s);
-  game.startGame(false);
-});
-document.getElementById('btn-resume').addEventListener('click', () => game.togglePause());
-document.getElementById('btn-quit-title').addEventListener('click', () => {
-  document.getElementById('pause-screen').classList.add('hidden');
-  document.getElementById('start-screen').classList.remove('hidden');
-  game.state = 'title';
+// Title screen: click starts a fresh run, or continues the saved one.
+canvas.addEventListener('mousedown', () => {
+  game.sounds.ensure();
+  if (game.mode === 'title') game.start(false);
+  else if (game.mode === 'busted' || game.mode === 'complete') game.resume();
 });
 
-// Autosave when the tab is left, so progress is never lost silently.
-window.addEventListener('beforeunload', () => { if (game.state === 'playing') game.save(); });
+let last = performance.now();
+let shotReady = false;
 
-function loop(now) {
-  game.frame(now);
-  requestAnimationFrame(loop);
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+
+  // P pause, M mute — edge-triggered, checked before the update.
+  if (input.hit('p')) {
+    if (game.mode === 'play') game.mode = 'paused';
+    else if (game.mode === 'paused') game.mode = 'play';
+  }
+  if (input.hit('m')) {
+    const muted = game.sounds.toggleMute();
+    game.toast(muted ? 'Sound muted (M to unmute).' : 'Sound on.', '#ffe9a8');
+  }
+
+  game.update(input, dt);
+
+  // Camera shake: a few pixels of jitter while the car screams.
+  ctx.save();
+  if (game.shake > 0) ctx.translate((Math.random() - 0.5) * game.shake, (Math.random() - 0.5) * game.shake);
+  renderWorld(ctx, game);
+  ctx.restore();
+  if (game.mode !== 'title') renderHUD(ctx, game);
+  renderOverlay(ctx, game);
+  input.endFrame();
+
+  if (shot && !shotReady) {
+    shotReady = true;
+    window.__shotReady = true; // the screenshot driver waits for this flag
+  }
+  requestAnimationFrame(frame);
 }
-requestAnimationFrame(loop);
 
-// Debug handle for the automated playtests. It only moves the player,
-// sets state and reads it back — it cannot change the shipped game.
-window.__solmar = {
-  game,
-  state() {
-    return {
-      state: game.state,
-      x: Math.round(game.player.x), y: Math.round(game.player.y),
-      money: game.money, health: Math.round(game.player.health),
-      wanted: game.wanted, inCar: game.inCar,
-      speed: game.inCar && game.car ? Math.round(Math.abs(game.car.speed)) : 0,
-      cops: game.cops.length, enemies: game.enemies.length,
-      peds: game.peds.length, traffic: game.traffic.length,
-      mission: game.missions.index, missionActive: game.missions.active,
-      missionStep: game.missions.step, completed: game.missions.completedCount,
-      objective: game.objectiveText,
-    };
-  },
-  teleport(x, y) {
-    if (game.inCar && game.car) { game.car.x = x; game.car.y = y; }
-    game.player.x = x; game.player.y = y;
-  },
-  setWanted(n) { game.wanted = n; game.quietTimer = 0; },
-  startMission(i) { game.missions.startMission(i); },
-  nearestParkedCar() {
-    let best = null, bd = Infinity;
-    for (const c of game.parkedCars) {
-      const d = (c.x - game.player.x) ** 2 + (c.y - game.player.y) ** 2;
-      if (d < bd) { bd = d; best = { x: c.x, y: c.y, targetCar: !!c.targetCar }; }
-    }
-    return best;
-  },
-  targetCar() {
-    const c = game.parkedCars.find((p) => p.targetCar);
-    return c ? { x: c.x, y: c.y } : null;
-  },
-  aimAt(x, y) {
-    game.input.mouse.x = x - game.cam.x;
-    game.input.mouse.y = y - game.cam.y;
-  },
-  shootAt(x, y) {
-    game.input.mouse.x = x - game.cam.x;
-    game.input.mouse.y = y - game.cam.y;
-    game.player.gunTimer = 0;
-    game.tryShoot(0);
-  },
-  hurt(n) { game.hurtPlayer(n); },
-};
+// Screenshot mode: stage the named scene, render it frozen, flag ready.
+if (shot) {
+  game.applyShot(shot);
+  // One warm-up render so fonts and the first frame settle, then the loop
+  // keeps drawing the same frozen frame (update() returns early when frozen).
+  renderWorld(ctx, game);
+  renderHUD(ctx, game);
+}
+requestAnimationFrame(frame);

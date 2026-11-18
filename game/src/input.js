@@ -1,49 +1,30 @@
-// Solmar Heat — keyboard + mouse input. Keys are tracked by code so
-// layouts do not matter; mouse position is kept in screen pixels and
-// converted to world aim by the game.
+// GOLDEN TIDE — input.js
+// One job: keyboard and mouse state. WASD/arrows to move and drive, E to enter
+// or steal a car, Space or click to shoot, P pause, M mute, R restart a run.
 
 export class Input {
   constructor(canvas) {
-    this.keys = new Set();
-    this.mouse = { x: 0, y: 0, down: false };
-    this._pressed = new Set(); // edge-triggered keys, consumed each frame
-    this.canvas = canvas;
-
+    this.keys = {};
+    this.mouse = { x: 0, y: 0, down: false, clicked: false };
+    this.pressed = {}; // keys pressed since last frame (edge-triggered)
     window.addEventListener('keydown', (e) => {
-      if (e.code === 'Space') e.preventDefault();
-      if (!e.repeat) this._pressed.add(e.code);
-      this.keys.add(e.code);
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) e.preventDefault();
+      if (!this.keys[e.key.toLowerCase()]) this.pressed[e.key.toLowerCase()] = true;
+      this.keys[e.key.toLowerCase()] = true;
     });
-    window.addEventListener('keyup', (e) => this.keys.delete(e.code));
-    window.addEventListener('blur', () => { this.keys.clear(); this.mouse.down = false; });
-
+    window.addEventListener('keyup', (e) => { this.keys[e.key.toLowerCase()] = false; });
     canvas.addEventListener('mousemove', (e) => {
       const r = canvas.getBoundingClientRect();
-      this.mouse.x = e.clientX - r.left;
-      this.mouse.y = e.clientY - r.top;
+      this.mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
+      this.mouse.y = (e.clientY - r.top) * (canvas.height / r.height);
     });
-    canvas.addEventListener('mousedown', (e) => {
-      if (e.button === 0) this.mouse.down = true;
-    });
+    canvas.addEventListener('mousedown', (e) => { this.mouse.down = true; this.mouse.clicked = true; });
     window.addEventListener('mouseup', () => { this.mouse.down = false; });
-    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    window.addEventListener('blur', () => { this.keys = {}; this.mouse.down = false; });
   }
 
-  down(code) { return this.keys.has(code); }
-
-  // True once on the frame the key went down.
-  pressed(code) { return this._pressed.has(code); }
-
-  // WASD / arrows as a normalised movement vector.
-  moveVector() {
-    let x = 0, y = 0;
-    if (this.down('KeyA') || this.down('ArrowLeft')) x -= 1;
-    if (this.down('KeyD') || this.down('ArrowRight')) x += 1;
-    if (this.down('KeyW') || this.down('ArrowUp')) y -= 1;
-    if (this.down('KeyS') || this.down('ArrowDown')) y += 1;
-    if (x !== 0 && y !== 0) { x *= Math.SQRT1_2; y *= Math.SQRT1_2; }
-    return { x, y };
-  }
-
-  endFrame() { this._pressed.clear(); }
+  down(...names) { return names.some((n) => this.keys[n]); }
+  hit(...names) { return names.some((n) => this.pressed[n]); }
+  // Call at the end of each frame so edge triggers fire exactly once.
+  endFrame() { this.pressed = {}; this.mouse.clicked = false; }
 }

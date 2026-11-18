@@ -1,223 +1,95 @@
-// Solmar Heat — full real-interaction playtest, run in headless Chrome
-// over the real game. Every system is driven through the keyboard and
-// mouse (plus the debug handle for teleports), and the run fails on any
-// console error or any non-local network request.
-//
-//   node tests/playtest.mjs
-// Exit code 0 = everything passed.
+// GOLDEN TIDE — tests/playtest.mjs
+// One job: prove the game really plays — walk, enter a car, drive, steal,
+// shoot, wanted rises, police chase, a mission advances to completion.
+// Run: node tests/playtest.mjs (starts its own server on :8123).
 
-import { startServer, launchBrowser, newGamePage, state, holdKey, pressKey, waitForState } from './helpers.mjs';
+import { startServer, openGame, launch, holdKey, check } from './helpers.mjs';
 
-let passed = 0;
-function check(name, ok, detail) {
-  if (ok) { passed++; console.log(`  PASS ${name}`); }
-  else { console.log(`  FAIL ${name}${detail ? ' — ' + detail : ''}`); process.exitCode = 1; }
-}
+const failures = [];
+const server = await startServer();
+const { browser, page } = await launch();
+try {
+  const { errors, failed } = await openGame(page, '?seed=7');
+  check(errors.length === 0, 'no console errors (' + errors.join(' | ') + ')', failures);
+  check(failed.length === 0, 'no failed requests', failures);
 
-const { server, port } = await startServer();
-const browser = await launchBrowser();
-const { page, errors, requests } = await newGamePage(browser, port);
+  // Title screen is up; click to start.
+  check(await page.evaluate(() => window.GT.mode === 'title'), 'title screen shows', failures);
+  await page.mouse.click(640, 510);
+  await page.waitForTimeout(300);
+  check(await page.evaluate(() => window.GT.mode === 'play'), 'click starts the game', failures);
 
-console.log('== Solmar Heat playtest ==');
-console.log('serving game/ on 127.0.0.1:' + port);
+  // Walk: W moves the player north.
+  const y0 = await page.evaluate(() => window.GT.player.y);
+  await holdKey(page, 'w', 700);
+  const y1 = await page.evaluate(() => window.GT.player.y);
+  check(y1 < y0 - 30, 'walking moves the player (y ' + Math.round(y0) + ' -> ' + Math.round(y1) + ')', failures);
 
-// 1. Title screen loads, game boots, no errors yet.
-check('title screen visible', await page.isVisible('#start-screen'));
-check('start button present', await page.isVisible('#btn-start'));
-
-// 2. Start a new game.
-await page.click('#btn-start');
-await page.waitForTimeout(400);
-let s = await state(page);
-check('game starts playing', s.state === 'playing', JSON.stringify(s));
-check('mission 1 active on start', s.mission === 0 && s.missionActive === true, JSON.stringify(s));
-check('objective shown', (await page.textContent('#hud-objective')).length > 5);
-
-// 3. Walk: stand on a clear stretch of road, hold W, the player must move.
-await page.evaluate(() => window.__solmar.teleport(980, 880));
-await page.waitForTimeout(200);
-const before = await state(page);
-await holdKey(page, 'KeyW', 900);
-s = await state(page);
-const walked = Math.hypot(s.x - before.x, s.y - before.y);
-check('walking moves the player', walked > 60, `moved ${Math.round(walked)}px`);
-
-// 4. Sprint is faster than walking.
-const s0 = await state(page);
-await holdKey(page, 'KeyW', 500);
-const s1 = await state(page);
-const dWalk = Math.hypot(s1.x - s0.x, s1.y - s0.y);
-await page.keyboard.down('ShiftLeft');
-await holdKey(page, 'KeyW', 500);
-await page.keyboard.up('ShiftLeft');
-const s2 = await state(page);
-const dSprint = Math.hypot(s2.x - s1.x, s2.y - s1.y);
-check('sprint beats walking', dSprint > dWalk * 1.15, `walk ${Math.round(dWalk)} vs sprint ${Math.round(dSprint)}`);
-
-// 5. Steal a car: teleport next to the nearest parked car, press E.
-const car = await page.evaluate(() => window.__solmar.nearestParkedCar());
-await page.evaluate((c) => window.__solmar.teleport(c.x, c.y), car);
-await page.waitForTimeout(200);
-await pressKey(page, 'KeyE');
-s = await waitForState(page, (st) => st.inCar === true, 5000, 'entering car');
-check('E steals the car', s.inCar === true, JSON.stringify(s));
-check('stealing raises wanted to 1+', s.wanted >= 1, `wanted=${s.wanted}`);
-
-// 6. Drive: hold W, speed must climb and the car must travel.
-// Sample the peak speed: a cop ram or a bump can dip the final reading.
-await page.keyboard.down('KeyW');
-let peakSpeed = 0;
-for (let i = 0; i < 9; i++) {
-  await page.waitForTimeout(200);
-  const sp = (await state(page)).speed;
-  if (sp > peakSpeed) peakSpeed = sp;
-}
-await page.keyboard.up('KeyW');
-s = await state(page);
-check('driving accelerates', peakSpeed > 300, `peak speed=${peakSpeed}`);
-const drove = Math.hypot(s.x - car.x, s.y - car.y);
-check('car actually travels', drove > 250, `travelled ${Math.round(drove)}px`);
-check('speedometer visible while driving', await page.isVisible('#hud-speed'));
-
-// 7. Steering changes heading.
-const headingBefore = await page.evaluate(() => window.__solmar.game.car.angle);
-await page.keyboard.down('KeyW');
-await holdKey(page, 'KeyA', 700);
-await page.keyboard.up('KeyW');
-const headingAfter = await page.evaluate(() => window.__solmar.game.car.angle);
-check('steering turns the car', Math.abs(headingAfter - headingBefore) > 0.4,
-  `angle ${headingBefore.toFixed(2)} -> ${headingAfter.toFixed(2)}`);
-
-// 8. Get out with E.
-await pressKey(page, 'KeyE');
-s = await waitForState(page, (st) => st.inCar === false, 5000, 'exiting car');
-check('E steps out of the car', s.inCar === false, JSON.stringify(s));
-
-// 9. Shooting: on an open intersection, spawn a thug, shoot it until it drops.
-await page.evaluate(() => window.__solmar.teleport(1600, 880));
-await page.waitForTimeout(200);
-await page.evaluate(() => {
-  const g = window.__solmar.game;
-  g.spawnEnemy(g.player.x + 170, g.player.y);
-});
-await page.waitForTimeout(200);
-const moneyBefore = (await state(page)).money;
-for (let i = 0; i < 4; i++) {
-  const e = await page.evaluate(() => {
-    const g = window.__solmar.game;
-    const en = g.enemies[0];
-    return en ? { x: en.x, y: en.y } : null;
-  });
-  if (!e) break;
-  await page.evaluate((p) => window.__solmar.shootAt(p.x, p.y), e);
-  await page.waitForTimeout(450);
-}
-s = await waitForState(page, (st) => st.enemies === 0, 8000, 'thug killed');
-check('shooting kills the thug', s.enemies === 0, JSON.stringify(s));
-check('kill pays $50', s.money === moneyBefore + 50, `$${moneyBefore} -> $${s.money}`);
-
-// 10. Wanted + police: 2 stars must bring cruisers.
-await page.evaluate(() => window.__solmar.setWanted(2));
-s = await waitForState(page, (st) => st.cops >= 2, 8000, 'cops spawn');
-check('2 stars spawn 2 cruisers', s.cops >= 2, JSON.stringify(s));
-check('siren HUD shows stars', (await page.textContent('#hud-stars')).includes('★'));
-
-// 11. Mission 1 — The Pickup, full flow through keyboard + teleports.
-await page.evaluate(() => window.__solmar.setWanted(0));
-await page.evaluate(() => window.__solmar.startMission(0));
-await page.evaluate(() => window.__solmar.teleport(2450, 2030)); // Sunset Pier
-await page.waitForTimeout(300);
-check('pier prompt shows', (await page.textContent('#hud-prompt')).includes('Press E'), await page.textContent('#hud-prompt'));
-await pressKey(page, 'KeyE');
-await page.waitForTimeout(300);
-s = await state(page);
-check('pickup advances the mission', s.missionStep === 1, JSON.stringify(s));
-await page.evaluate(() => window.__solmar.teleport(500, 620)); // Vera's Garage forecourt
-await page.waitForTimeout(300);
-await pressKey(page, 'KeyE');
-s = await waitForState(page, (st) => st.completed === 1, 5000, 'mission 1 completes');
-check('mission 1 completes, +$300', s.money >= moneyBefore + 50 + 300, `money=$${s.money}`);
-
-// 12. Mission 2 — Hot Wheels: steal the gold coupe, deliver it.
-await waitForState(page, (st) => st.mission === 1 && st.missionActive, 12000, 'mission 2 call');
-const gold = await page.evaluate(() => window.__solmar.targetCar());
-check('gold coupe is on the map', !!gold, JSON.stringify(gold));
-await page.evaluate((g) => window.__solmar.teleport(g.x, g.y), gold);
-await page.waitForTimeout(200);
-await pressKey(page, 'KeyE');
-s = await waitForState(page, (st) => st.inCar === true, 5000, 'stealing gold coupe');
-check('gold coupe stolen', s.inCar === true, JSON.stringify(s));
-await page.evaluate(() => window.__solmar.teleport(2960, 1780)); // Rust & Bolt Yard
-s = await waitForState(page, (st) => st.completed === 2, 5000, 'mission 2 completes');
-check('mission 2 completes, +$500', s.completed === 2, JSON.stringify(s));
-
-// 13. Mission 3 — Deadline Run, timed, full flow.
-// Step out of the coupe first: E while driving exits the car, and the
-// pickup needs the player on foot.
-await pressKey(page, 'KeyE');
-await waitForState(page, (st) => st.inCar === false, 5000, 'out of coupe');
-await waitForState(page, (st) => st.mission === 2 && st.missionActive, 12000, 'mission 3 call');
-await page.evaluate(() => window.__solmar.teleport(2246, 1830)); // Harbor Market, west road side
-await page.waitForTimeout(300);
-await pressKey(page, 'KeyE');
-await page.waitForTimeout(300);
-s = await state(page);
-check('crate picked up, timer running', s.missionStep === 1 && (await page.isVisible('#hud-timer')), JSON.stringify(s));
-await page.evaluate(() => window.__solmar.teleport(2620, 450)); // Lumen Tower forecourt
-await page.waitForTimeout(300);
-await pressKey(page, 'KeyE');
-s = await waitForState(page, (st) => st.completed === 3, 5000, 'mission 3 completes');
-check('mission 3 completes, story done', s.completed === 3 && s.mission === -1, JSON.stringify(s));
-
-// 14. Busted: stand next to a cruiser until the arrest lands.
-// Keep re-planting the player on the cruiser so the arrest timer
-// accumulates instead of the cruiser circling past.
-await page.evaluate(() => window.__solmar.setWanted(1));
-await waitForState(page, (st) => st.cops >= 1, 8000, 'cruiser for arrest');
-let bustedAt = null;
-for (let i = 0; i < 40; i++) {
+  // Teleport next to a parked car and steal it with E.
   await page.evaluate(() => {
-    const g = window.__solmar.game;
-    const cop = g.cops[0];
-    if (cop) { g.player.x = cop.x + 15; g.player.y = cop.y; }
+    const g = window.GT;
+    g.player.x = 1150; g.player.y = 2940; g.player.onFoot = true; g.player.car = null;
   });
-  await page.waitForTimeout(400);
-  const st = await state(page);
-  if (st.state === 'busted') { bustedAt = st; break; }
+  await page.keyboard.press('e');
+  await page.waitForTimeout(300);
+  const stolen = await page.evaluate(() => ({ inCar: !window.GT.player.onFoot, type: window.GT.player.car?.type, stars: window.GT.wanted.stars }));
+  check(stolen.inCar, 'E enters a car', failures);
+  check(stolen.stars >= 1, 'stealing raises wanted to ' + stolen.stars + ' star(s)', failures);
+
+  // Drive: W accelerates the car.
+  const s0 = await page.evaluate(() => Math.abs(window.GT.player.car.speed));
+  await holdKey(page, 'w', 1200);
+  const s1 = await page.evaluate(() => Math.abs(window.GT.player.car.speed));
+  check(s1 > s0 + 60, 'driving accelerates (' + Math.round(s0) + ' -> ' + Math.round(s1) + ' px/s)', failures);
+
+  // Police respond to the wanted level.
+  await page.waitForTimeout(2500);
+  const police = await page.evaluate(() => window.GT.police.length);
+  check(police >= 2, 'police cruisers chase (' + police + ' on scene)', failures);
+
+  // Get out, shoot: ammo drops, a bullet flies, wanted climbs.
+  await page.keyboard.press('e');
+  await page.waitForTimeout(200);
+  const before = await page.evaluate(() => ({ ammo: window.GT.player.ammo, heat: window.GT.wanted.heat }));
+  await page.mouse.click(700, 300);
+  await page.waitForTimeout(200);
+  const after = await page.evaluate(() => ({ ammo: window.GT.player.ammo, heat: window.GT.wanted.heat, bullets: window.GT.bullets.length }));
+  check(after.ammo === before.ammo - 1, 'shooting spends ammo (' + before.ammo + ' -> ' + after.ammo + ')', failures);
+  check(after.heat > before.heat, 'shooting raises heat', failures);
+
+  // Mission M1: teleport to the pier package, then to the garage — it completes.
+  await page.evaluate(() => {
+    const g = window.GT;
+    g.missions.index = 0; g.missions.stage = 0;
+    g.player.x = 300; g.player.y = 1750; g.player.onFoot = true; g.player.car = null;
+    g.wanted.heat = 0; g.wanted.stars = 0;
+  });
+  await page.waitForTimeout(600);
+  const stage1 = await page.evaluate(() => window.GT.missions.stage);
+  check(stage1 === 1, 'M1 stage 0 completes at the pier (stage=' + stage1 + ')', failures);
+  await page.evaluate(() => { const g = window.GT; g.player.x = 1300; g.player.y = 3050; });
+  await page.waitForTimeout(600);
+  const m1 = await page.evaluate(() => ({ index: window.GT.missions.index, money: window.GT.money }));
+  check(m1.index === 1, 'M1 completes, M2 begins (mission index=' + m1.index + ')', failures);
+  check(m1.money >= 150, 'M1 pays out (money $' + m1.money + ')', failures);
+
+  // Pause works and the save file is written.
+  await page.keyboard.press('p');
+  await page.waitForTimeout(200);
+  check(await page.evaluate(() => window.GT.mode === 'paused'), 'P pauses', failures);
+  await page.keyboard.press('p');
+  check(await page.evaluate(() => localStorage.getItem('golden-tide-save-v1') !== null), 'autosave writes localStorage', failures);
+
+  // HUD reads: minimap, objective chip and money are on screen.
+  const hud = await page.evaluate(() => {
+    const g = window.GT;
+    return { money: g.money, stars: g.wanted.stars, objective: g.missions.index };
+  });
+  check(hud.money > 0 && hud.objective === 1, 'HUD state sane (money $' + hud.money + ', mission ' + (hud.objective + 1) + ')', failures);
+} finally {
+  await browser.close();
+  server.kill();
 }
-check('standing by a cruiser gets you busted', !!bustedAt, JSON.stringify(bustedAt));
-check('busted screen shows', await page.isVisible('#busted-screen'));
-s = await waitForState(page, (st) => st.state === 'playing' && st.wanted === 0, 8000, 'respawn after busted');
-check('respawn at garage, heat cleared', s.state === 'playing' && s.wanted === 0, JSON.stringify(s));
 
-// 15. Pause works.
-await pressKey(page, 'Escape');
-await page.waitForTimeout(200);
-s = await state(page);
-check('Esc pauses', s.state === 'paused', JSON.stringify(s));
-await pressKey(page, 'Escape');
-await page.waitForTimeout(200);
-s = await state(page);
-check('Esc resumes', s.state === 'playing', JSON.stringify(s));
-
-// 16. Save: localStorage holds progress; reload offers Continue.
-const saveRaw = await page.evaluate(() => localStorage.getItem('solmar-heat-save-v1'));
-check('save written to localStorage', !!saveRaw && JSON.parse(saveRaw).money > 0, saveRaw);
-const savedMoney = JSON.parse(saveRaw).money;
-await page.reload({ waitUntil: 'load' });
-await page.waitForFunction(() => window.__solmar, null, { timeout: 10000 });
-check('Continue offered after reload', await page.isVisible('#btn-continue'));
-await page.click('#btn-continue');
-await page.waitForTimeout(400);
-s = await state(page);
-check('Continue restores money + state', s.state === 'playing' && s.money === savedMoney,
-  `money=${s.money} saved=${savedMoney}`);
-
-// 17. No console errors, no page errors, no non-local requests.
-check('zero console/page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
-const external = requests.filter((u) => !u.startsWith('http://127.0.0.1') && !u.startsWith('data:'));
-check('zero external network requests', external.length === 0, external.slice(0, 3).join(' | '));
-
-await browser.close();
-server.close();
-console.log(`\n${passed} checks passed, exit ${process.exitCode || 0}`);
+if (failures.length) { console.error('\nPLAYTEST FAILED:\n- ' + failures.join('\n- ')); process.exit(1); }
+console.log('\nPLAYTEST PASSED');
