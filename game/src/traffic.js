@@ -1,93 +1,97 @@
-// traffic.js — 车流与行人：沿道路行驶的 NPC 车辆、在人行道上走的行人，及车辆绘制。
-import { AVENUES, STREETS, ROAD_W } from './city.js';
-import { CAR_TYPES } from './config.js';
-import { makeRng, range, pick } from './rng.js';
+// traffic.js — 车流与行人：沿道路网格行驶的 NPC 车，以及在人行道上散步的行人。
+// 车只沿一条大道或街道走，车道靠右；走到地图边缘就绕回另一头。
 
-const TRAFFIC_TYPES = ['sedan', 'sedan', 'taxi', 'van', 'pickup', 'truck'];
-const PED_COLORS = ['#e8e0c8', '#c96f5a', '#5f8f7a', '#d8a03c', '#7a6fb0', '#e8826a'];
+import { WORLD, ROADS_X, ROADS_Y, ROAD_W, CAR_TYPES } from './config.js';
+import { makeRng, range, pick, int } from './rng.js';
 
-// 生成一辆沿道路行驶的车：选一条大道或街道、一个方向、一条车道。
-function spawnTrafficCar(rng) {
-  const vertical = rng() < 0.5;
-  const type = pick(rng, TRAFFIC_TYPES);
-  if (vertical) {
-    const x = pick(rng, AVENUES);
-    const dir = rng() < 0.5 ? 1 : -1;
-    return { type, x: x + dir * 22, y: range(rng, 100, 3700), angle: dir > 0 ? Math.PI / 2 : -Math.PI / 2, speed: range(rng, 120, 200), vertical: true, road: x, dir };
-  }
-  const y = pick(rng, STREETS);
-  const dir = rng() < 0.5 ? 1 : -1;
-  return { type, x: range(rng, 400, 5100), y: y + dir * 22, angle: dir > 0 ? 0 : Math.PI, speed: range(rng, 120, 200), vertical: false, road: y, dir };
-}
-export function makeTraffic(seed) {
-  const rng = makeRng(seed + 11);
+const TRAFFIC_COLORS = ['#e8e4da', '#c0392b', '#3a6ea5', '#d9a441', '#5b7d4f', '#8e6bbf', '#d97b2f'];
+
+// 生成车流与行人：16 辆车 + 22 个行人。
+export function createTraffic(seed) {
+  const rng = makeRng(seed + 1000);
   const cars = [];
-  for (let i = 0; i < 26; i++) cars.push(spawnTrafficCar(rng));
-  const peds = [];
-  for (let i = 0; i < 42; i++) {
+  const types = ['sedan', 'sedan', 'taxi', 'van', 'pickup', 'sports'];
+  for (let i = 0; i < 16; i++) {
     const vertical = rng() < 0.5;
+    const type = pick(rng, types);
+    if (vertical) {
+      const x = pick(rng, ROADS_X) + (rng() < 0.5 ? -26 : 26);
+      cars.push({
+        x, y: range(rng, 100, WORLD.h - 100), angle: rng() < 0.5 ? -Math.PI / 2 : Math.PI / 2,
+        speed: range(rng, 60, 120), type, color: pick(rng, TRAFFIC_COLORS),
+        vertical: true, lane: x, driver: 'traffic', parked: false,
+      });
+    } else {
+      const y = pick(rng, ROADS_Y) + (rng() < 0.5 ? -26 : 26);
+      cars.push({
+        x: range(rng, 350, WORLD.w - 100), y, angle: rng() < 0.5 ? 0 : Math.PI,
+        speed: range(rng, 60, 120), type, color: pick(rng, TRAFFIC_COLORS),
+        vertical: false, lane: y, driver: 'traffic', parked: false,
+      });
+    }
+  }
+  const peds = [];
+  for (let i = 0; i < 22; i++) {
     peds.push({
-      x: vertical ? pick(rng, AVENUES) + (rng() < 0.5 ? -ROAD_W / 2 - 16 : ROAD_W / 2 + 16) : range(rng, 400, 5100),
-      y: vertical ? range(rng, 100, 3700) : pick(rng, STREETS) + (rng() < 0.5 ? -ROAD_W / 2 - 16 : ROAD_W / 2 + 16),
-      angle: range(rng, 0, 6.28), speed: range(rng, 28, 55), color: pick(rng, PED_COLORS),
-      vertical, t: range(rng, 0, 10),
+      x: range(rng, 350, WORLD.w - 100), y: range(rng, 100, WORLD.h - 100),
+      angle: range(rng, 0, Math.PI * 2), speed: range(rng, 18, 42),
+      color: pick(rng, ['#e74c3c', '#3498db', '#f1c40f', '#9b59b6', '#1abc9c', '#e67e22']),
+      timer: range(rng, 1, 4),
     });
   }
   return { cars, peds, rng };
 }
-// 车流更新：沿路直行，到路口随机转弯；出界则绕回另一端。
-export function updateTraffic(tr, dt, city) {
-  for (const c of tr.cars) {
+
+// 车流每帧：沿车道前进，前面有车就减速，走到头绕回。
+export function updateTraffic(dt, traffic, city) {
+  for (const c of traffic.cars) {
+    if (c.driver === 'player') continue; // 玩家开的车不在这里动
+    // 前方 70px 内有车就刹车。
+    let blocked = false;
+    for (const o of traffic.cars) {
+      if (o === c || o.driver === 'player') continue;
+      const dx = o.x - c.x, dy = o.y - c.y;
+      const along = c.vertical ? dy * Math.sin(c.angle) : dx * Math.cos(c.angle);
+      const side = c.vertical ? Math.abs(dx) : Math.abs(dy);
+      if (along > 0 && along < 78 && side < 30) { blocked = true; break; }
+    }
+    const target = blocked ? 0 : c.cruise || (c.cruise = c.speed);
+    c.speed += (target - c.speed) * Math.min(1, dt * 2);
     c.x += Math.cos(c.angle) * c.speed * dt;
     c.y += Math.sin(c.angle) * c.speed * dt;
-    // 到路口时 25% 概率转弯（保持在路网上）。
-    const nearX = AVENUES.find(x => Math.abs(c.x - x) < 26);
-    const nearY = STREETS.find(y => Math.abs(c.y - y) < 26);
-    if (nearX !== undefined && nearY !== undefined && tr.rng() < 0.25) {
-      if (c.vertical) { c.vertical = false; c.road = nearY; c.dir = tr.rng() < 0.5 ? 1 : -1; c.angle = c.dir > 0 ? 0 : Math.PI; c.y = nearY + c.dir * 22; }
-      else { c.vertical = true; c.road = nearX; c.dir = tr.rng() < 0.5 ? 1 : -1; c.angle = c.dir > 0 ? Math.PI / 2 : -Math.PI / 2; c.x = nearX + c.dir * 22; }
+    // 出界绕回另一头。
+    if (c.vertical) {
+      if (c.y < 40) c.y = WORLD.h - 40;
+      if (c.y > WORLD.h - 40) c.y = 40;
+    } else {
+      if (c.x < 320) c.x = WORLD.w - 60;
+      if (c.x > WORLD.w - 60) c.x = 320;
     }
-    if (c.x < 300) { c.x = 5100; } if (c.x > 5150) { c.x = 320; }
-    if (c.y < 20) { c.y = 3750; } if (c.y > 3780) { c.y = 40; }
   }
-  for (const p of tr.peds) {
-    p.t -= dt;
-    if (p.t <= 0) { p.t = range(tr.rng, 3, 9); p.angle = p.vertical ? (tr.rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2) : (tr.rng() < 0.5 ? 0 : Math.PI); }
-    p.x += Math.cos(p.angle) * p.speed * dt;
-    p.y += Math.sin(p.angle) * p.speed * dt;
-    if (p.x < 320) p.x = 320; if (p.x > 5150) p.x = 5150;
-    if (p.y < 20) p.y = 20; if (p.y > 3750) p.y = 3750;
+  // 行人：慢慢走，定时换方向，撞楼就掉头。
+  for (const p of traffic.peds) {
+    p.timer -= dt;
+    if (p.timer <= 0) {
+      p.angle = range(traffic.rng, 0, Math.PI * 2);
+      p.timer = range(traffic.rng, 2, 6);
+    }
+    const nx = p.x + Math.cos(p.angle) * p.speed * dt;
+    const ny = p.y + Math.sin(p.angle) * p.speed * dt;
+    if (nx > 300 && nx < WORLD.w - 20 && ny > 20 && ny < WORLD.h - 20) {
+      p.x = nx; p.y = ny;
+    } else {
+      p.angle += Math.PI;
+    }
   }
 }
-// 画一辆车（俯视）：长影 → 车身 → 车顶高光 → 车窗 → 车灯。警车加红蓝灯条。
-export function drawCar(ctx, x, y, angle, type, opts = {}) {
-  const def = CAR_TYPES[type] || CAR_TYPES.sedan;
-  const L = def.len, W = def.wid;
-  ctx.save(); ctx.translate(x, y); ctx.rotate(angle);
-  ctx.fillStyle = 'rgba(58,32,12,0.35)';
-  ctx.fillRect(-L / 2 + 9, -W / 2 + 6, L, W); // 长影朝东
-  ctx.fillStyle = opts.police ? '#2f5fd8' : def.color;
-  ctx.beginPath(); ctx.roundRect(-L / 2, -W / 2, L, W, 6); ctx.fill();
-  if (type === 'sports') { // 敞篷：无车顶，深色座舱
-    ctx.fillStyle = '#3a2a22'; ctx.beginPath(); ctx.roundRect(-4, -W / 2 + 3, 14, W - 6, 4); ctx.fill();
-  } else {
-    ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.fillRect(-L / 2 + 4, -W / 2 + 2, L - 8, 5); // 车顶高光
-    ctx.fillStyle = '#22303e'; ctx.beginPath(); ctx.roundRect(-L * 0.18, -W / 2 + 3, L * 0.32, W - 6, 3); ctx.fill();
+
+// 离某点最近的车流车辆（玩家按 E 抢车用）。
+export function nearestTrafficCar(traffic, x, y, maxDist) {
+  let best = null, bestD = maxDist;
+  for (const c of traffic.cars) {
+    if (c.driver === 'player') continue;
+    const d = Math.hypot(c.x - x, c.y - y);
+    if (d < bestD) { bestD = d; best = c; }
   }
-  if (type === 'taxi') { ctx.fillStyle = '#222'; ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('TAXI', 0, -W / 2 - 3); }
-  // 车灯
-  ctx.fillStyle = '#ffe9a8'; ctx.fillRect(L / 2 - 3, -W / 2 + 2, 3, 5); ctx.fillRect(L / 2 - 3, W / 2 - 7, 3, 5);
-  ctx.fillStyle = '#ff4a3a'; ctx.fillRect(-L / 2, -W / 2 + 2, 3, 5); ctx.fillRect(-L / 2, W / 2 - 7, 3, 5);
-  if (opts.police) { // 警灯：红蓝交替闪
-    ctx.fillStyle = opts.flash ? '#ff2a2a' : '#2a6bff'; ctx.fillRect(-6, -W / 2 - 2, 12, 5);
-    ctx.fillStyle = opts.flash ? '#2a6bff' : '#ff2a2a'; ctx.fillRect(-6, W / 2 - 3, 12, 5);
-  }
-  ctx.restore();
-}
-// 画行人：小圆影 + 彩色圆点身体。
-export function drawPed(ctx, p) {
-  ctx.fillStyle = 'rgba(58,32,12,0.3)';
-  ctx.beginPath(); ctx.ellipse(p.x + 5, p.y + 3, 7, 5, 0, 0, 6.29); ctx.fill();
-  ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, 6, 0, 6.29); ctx.fill();
-  ctx.fillStyle = '#2a2118'; ctx.beginPath(); ctx.arc(p.x, p.y - 2, 3, 0, 6.29); ctx.fill();
+  return best;
 }

@@ -1,384 +1,394 @@
-// city.js — Palmera 城市生成与静态绘制：道路网、街区、楼群、公园、海滩码头。
-// v3 重点：加密密度——空地全部填满楼/树/停车场/公园细节，不留大片空绿地。
-import { WORLD, PALETTE, SUN } from './config.js';
+// city.js — Palmera 的生成与静态预渲染。
+// 城市只生成一次、画进一张离屏大画布，游戏每帧只贴图（静态重画会把帧率拖到几 fps）。
+// 密度打磨：市中心 2×2 塔楼群、中层街区停车带、公园小路池塘、沙滩棕榈、码头长椅路灯货箱，
+// 每个街区都有东西，没有大片空绿地。
+
+import { WORLD, ROADS_X, ROADS_Y, ROAD_W, SEA_X, BEACH_Y, AIRPORT_X, CASH_SPOTS, PLACES } from './config.js';
 import { makeRng, range, pick, int } from './rng.js';
 
-export const AVENUES = [420, 1020, 1620, 2220, 2820, 3420, 4020, 4620]; // 纵向大道中心线
-export const STREETS = [380, 880, 1380, 1880, 2380, 2880, 3380];       // 横向街道中心线
-export const ROAD_W = 96;
-const ROOFS = [PALETTE.roofCream, PALETTE.roofCoral, PALETTE.roofTeal, PALETTE.roofTerra, PALETTE.roofPink, PALETTE.roofWhite];
-const NEON_TEXT = ['PALMERA', 'HOTEL', 'CASINO', 'TIDE', 'SUNSET', 'PIER 9', 'BAR', '24H TACOS'];
+// 楼体配色：暖黄昏下的奶油、砖红、蓝灰、粉橙。
+const BUILDING_COLORS = ['#e8c98f', '#d98a5f', '#7fa3c4', '#e59a7a', '#c9b083', '#8fb0a0', '#d9b36c'];
+const TOWER_COLORS = ['#e8c98f', '#7fa3c4', '#e59a7a', '#d9b36c'];
+const NEON_SIGNS = [
+  { text: 'TIDE', color: '#37e6d4' },
+  { text: 'PIER 9', color: '#ffb347' },
+  { text: 'GOLD', color: '#ffd94a' },
+  { text: 'VEGA', color: '#ff7ab8' },
+];
 
-// 街区划分：道路之间的矩形地块。
-function blockRects() {
-  const xs = [300, ...AVENUES.flatMap(x => [x + ROAD_W / 2]), 5200];
-  // 更直观：用道路中心线切出地块区间
-  const xBounds = [300];
-  for (const x of AVENUES) { xBounds.push(x - ROAD_W / 2, x + ROAD_W / 2); }
-  xBounds.push(5200);
-  const yBounds = [0];
-  for (const y of STREETS) { yBounds.push(y - ROAD_W / 2, y + ROAD_W / 2); }
-  yBounds.push(3800);
-  const blocks = [];
-  for (let i = 0; i < xBounds.length - 1; i += 2)
-    for (let j = 0; j < yBounds.length - 1; j += 2)
-      blocks.push({ x0: xBounds[i], y0: yBounds[j], x1: xBounds[i + 1], y1: yBounds[j + 1] });
-  return blocks;
-}
+// 码头木板区：水面上唯一可行走的矩形。
+export const PIER = { x0: 55, y0: 1000, x1: 300, y1: 1255 };
 
+// 生成整座城市：楼、树、棕榈、长椅、货箱、路灯、停着的车、地标建筑。
 export function buildCity(seed) {
   const rng = makeRng(seed);
   const city = {
-    buildings: [], trees: [], lamps: [], billboards: [], benches: [], bushes: [],
-    parked: [], pools: [], signs: [], yachts: [], containers: [], speckles: [], glints: [],
-    spots: {},
+    seed,
+    buildings: [], trees: [], palms: [], benches: [], crates: [], lamps: [],
+    parkedCars: [], plazas: [],
+    park: { x: 700, y: 1300, w: 400, h: 350, pond: { x: 900, y: 1475, rx: 95, ry: 55 } },
+    beach: { x: 300, y: BEACH_Y, w: WORLD.w - 300, h: WORLD.h - BEACH_Y },
+    runway: { x: 3200, y: 1680, w: 150, h: 640 },
+    garage: { x: 1280, y: 620, w: 150, h: 110 },
+    chopShop: { x: 2430, y: 2020, w: 150, h: 110 },
   };
-  // 草地斑点纹理（确定性，供绘制时点缀地面）。
-  for (let i = 0; i < 900; i++)
-    city.speckles.push({ x: range(rng, 300, 5200), y: range(rng, 0, 3800), r: range(rng, 2, 6), c: rng() < 0.5 ? PALETTE.grassDark : PALETTE.grassLight });
-  // 海面阳光碎光点（动画闪烁用）。
-  for (let i = 0; i < 70; i++)
-    city.glints.push({ x: range(rng, 0, 150), y: range(rng, 0, 3800), p: range(rng, 0, 6.28), s: range(rng, 2, 5) });
 
-  const blocks = blockRects();
-  const parkIdx = new Set([21, 30, 43, 53]); // 固定几块地做公园（按街区序号）
-  let bi = 0;
-  for (const b of blocks) {
-    const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
-    const w = b.x1 - b.x0, h = b.y1 - b.y0;
-    // 海滩与首条大道之间的窄条只种树，不盖楼。
-    if (w < 150 || h < 150) { scatterTrees(city, rng, b, 4, 0.7); bi++; continue; }
-    const downtown = cx > 2700 && cx < 4750 && cy < 1450;
-    const airport = cx > 4600 && cy > 3400;
-    const docks = cx > 4600 && cy > 1400 && cy < 2900;
-    const beachSide = cx < 1100 && cy > 2850;
-    if (airport) { buildAirport(city, rng, b); bi++; continue; }
-    if (parkIdx.has(bi)) { buildPark(city, rng, b); bi++; continue; }
-    if (docks) { buildDocks(city, rng, b); bi++; continue; }
-    if (downtown) { buildDowntownBlock(city, rng, b); bi++; continue; }
-    if (beachSide) { buildBeachBlock(city, rng, b); bi++; continue; }
-    buildMidBlock(city, rng, b);
-    bi++;
+  // —— 市中心 2×2 塔楼群（带霓虹招牌），在地图中北部。
+  const towerSpots = [
+    { x: 1560, y: 640, neon: NEON_SIGNS[0] },
+    { x: 1900, y: 640, neon: NEON_SIGNS[1] },
+    { x: 1560, y: 1010, neon: NEON_SIGNS[2] },
+    { x: 1900, y: 1010, neon: NEON_SIGNS[3] },
+  ];
+  for (const t of towerSpots) {
+    city.buildings.push({
+      x: t.x, y: t.y, w: 250, h: 210, tower: true,
+      fill: TOWER_COLORS[city.buildings.length % TOWER_COLORS.length],
+      neon: t.neon, seed: int(rng, 1, 99999),
+    });
   }
 
-  // 码头：木栈道伸进海里（西边），游艇停在水面；栈道上摆长椅、路灯、货箱。
-  city.pier = { x0: 55, y0: 1480, x1: 420, y1: 1660 };
-  city.benches.push({ x: 120, y: 1510, a: 0 }, { x: 120, y: 1630, a: Math.PI }, { x: 380, y: 1500, a: Math.PI / 2 });
-  city.lamps.push({ x: 90, y: 1500 }, { x: 90, y: 1640 }, { x: 400, y: 1570 });
-  city.containers.push({ x: 360, y: 1500, w: 44, h: 34, c: '#a97e4f' }, { x: 360, y: 1600, w: 44, h: 34, c: '#8a6a42' });
-  // 沙滩带种满棕榈（码头以南海滩不再空）。
-  for (let i = 0; i < 16; i++)
-    city.trees.push({ x: range(rng, 170, 290), y: range(rng, 120, 3700), r: range(rng, 10, 15), palm: true });
-  for (let i = 0; i < 5; i++)
-    city.yachts.push({ x: range(rng, 30, 120), y: 300 + i * 620 + range(rng, -40, 40), a: range(rng, -0.3, 0.3) });
-  // 路灯沿每条大道/街道两侧每 190 单位一盏。
-  for (const x of AVENUES) for (let y = 60; y < 3800; y += 190) {
-    city.lamps.push({ x: x - ROAD_W / 2 - 12, y }); city.lamps.push({ x: x + ROAD_W / 2 + 12, y: y + 95 });
-  }
-  for (const y of STREETS) for (let x = 360; x < 5200; x += 190) {
-    city.lamps.push({ x, y: y - ROAD_W / 2 - 12 }); city.lamps.push({ x: x + 95, y: y + ROAD_W / 2 + 12 });
-  }
-  // 广告牌立在主要路口。
-  const bbSpots = [[1020, 880], [2220, 1380], [3420, 880], [2820, 2380], [1620, 2880], [4020, 1880]];
-  for (const [x, y] of bbSpots)
-    city.billboards.push({ x: x + 90, y: y - 90, text: pick(rng, NEON_TEXT), color: pick(rng, [PALETTE.neonPink, PALETTE.neonCyan, '#ffb347']) });
+  // —— 地标小楼：修车铺与 Chop Shop（任务终点，有招牌）。
+  city.buildings.push({ x: city.garage.x, y: city.garage.y, w: 150, h: 110, fill: '#c97e4a', neon: { text: "MARA'S", color: '#ffd94a' }, seed: 11 });
+  city.buildings.push({ x: city.chopShop.x, y: city.chopShop.y, w: 150, h: 110, fill: '#5f6b7a', neon: { text: 'CHOP', color: '#ff7ab8' }, seed: 22 });
+  // 机场机库与塔台。
+  city.buildings.push({ x: 3180, y: 1500, w: 130, h: 90, fill: '#8a94a6', neon: null, seed: 33 });
+  city.buildings.push({ x: 3180, y: 2400, w: 90, h: 90, fill: '#aab4c4', neon: { text: 'AIR', color: '#37e6d4' }, seed: 44 });
 
-  // 关键地点坐标（任务与玩法共用）。
-  city.spots = {
-    pierPickup: { x: 200, y: 1570 },                 // M1 取包点（码头）
-    mara: { x: 720, y: 3100 },                       // Mara 修车铺（南滩）
-    chop: { x: 4850, y: 2100 },                      // Chop Shop（东码头）
-    airport: { x: 4780, y: 3620 },                   // M4 机场终点
-    convertible: { x: 770, y: 1900, angle: 0 },      // M2 橙色敞篷车（码头旁街道）
-    vanSpawn: { x: 1020, y: 2100 },                 // M4 逃逸厢车（大道上）
-    playerStart: { x: 520, y: 1900 },               // 玩家出生点（码头旁街道）
-    startSedan: { x: 660, y: 1900, angle: Math.PI }, // 出生点旁的轿车
-    taxiStand: { x: 1020, y: 1250 },
-    stashes: [                                       // 5 个隐藏现金点
-      { x: 500, y: 420 }, { x: 2500, y: 900 }, { x: 3300, y: 2600 },
-      { x: 1200, y: 3200 }, { x: 4400, y: 1500 },
-    ],
-  };
-  // 出生点旁与码头停车场停几辆车（可偷）。
-  city.parked.push(
-    { x: 670, y: 1900, angle: Math.PI, type: 'sedan' },
-    { x: 770, y: 1900, angle: 0, type: 'sports' },
-    { x: 870, y: 1900, angle: 0, type: 'taxi' },
-    { x: 1020, y: 2100, angle: Math.PI / 2, type: 'van' },
-    { x: 580, y: 1900, angle: -Math.PI / 2, type: 'pickup' },
-  );
-  // 关键点若落在建筑里，向东逐格挪到空地（保证任务点永远可达）。
-  for (const k of ['mara', 'chop', 'airport', 'playerStart']) {
-    const s = city.spots[k];
-    const f = findFreeSpot(city, s.x, s.y);
-    s.x = f.x; s.y = f.y;
+  // —— 其余街区：一格一栋或两栋楼，沿街加停车带（停着的车）与行道树。
+  // 街区由相邻两条路围出来；跳过海洋、公园、沙滩、机场、市中心塔楼区。
+  for (let xi = 0; xi < ROADS_X.length - 1; xi++) {
+    for (let yi = 0; yi < ROADS_Y.length - 1; yi++) {
+      const x0 = ROADS_X[xi] + ROAD_W / 2 + 14;
+      const x1 = ROADS_X[xi + 1] - ROAD_W / 2 - 14;
+      const y0 = ROADS_Y[yi] + ROAD_W / 2 + 14;
+      const y1 = ROADS_Y[yi + 1] - ROAD_W / 2 - 14;
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+      if (x1 < SEA_X + 40) continue; // 海里不盖楼
+      if (x0 > AIRPORT_X - 60) continue; // 机场不盖楼
+      if (y0 > BEACH_Y - 40) continue; // 沙滩不盖楼
+      if (cx > 700 && cx < 1100 && cy > 1300 && cy < 1650) continue; // 公园
+      if (cx > 1500 && cx < 2200 && cy > 600 && cy < 1300) continue; // 市中心塔楼区
+      // 修车铺 / Chop Shop 所在的街区不另盖楼，避免压住地标。
+      if (x0 < city.garage.x + city.garage.w && x1 > city.garage.x && y0 < city.garage.y + city.garage.h && y1 > city.garage.y) continue;
+      if (x0 < city.chopShop.x + city.chopShop.w && x1 > city.chopShop.x && y0 < city.chopShop.y + city.chopShop.h && y1 > city.chopShop.y) continue;
+      const bw = x1 - x0, bh = y1 - y0;
+      if (bw < 90 || bh < 90) continue;
+      // 一栋主楼，占街区六成左右。
+      const lw = Math.min(bw * 0.62, 240);
+      const lh = Math.min(bh * 0.62, 190);
+      city.buildings.push({
+        x: x0 + range(rng, 4, Math.max(5, bw - lw - 4)),
+        y: y0 + range(rng, 4, Math.max(5, bh - lh - 4)),
+        w: lw, h: lh, fill: pick(rng, BUILDING_COLORS), neon: null,
+        seed: int(rng, 1, 99999),
+      });
+      // 停车带：沿街区南缘、贴着路边停 2–3 辆车（可偷），车头沿路朝东，起步就在路上不撞墙。
+      const parkN = int(rng, 2, 4);
+      for (let p = 0; p < parkN; p++) {
+        const px = x0 + 30 + p * 62 + range(rng, -6, 6);
+        const py = y1 + 32;
+        if (px > x1 - 30) break;
+        city.parkedCars.push({
+          x: px, y: py, angle: 0, type: pick(rng, ['sedan', 'sedan', 'pickup', 'van', 'sports']),
+          color: pick(rng, ['#e8e4da', '#c0392b', '#7fb3d5', '#3a6ea5', '#d9a441', '#5b7d4f']),
+          parked: true, taken: false,
+        });
+      }
+      // 行道树 2–4 棵，街角再补一棵。
+      const treeN = int(rng, 2, 5);
+      for (let t = 0; t < treeN; t++) {
+        city.trees.push({ x: range(rng, x0 + 16, x1 - 16), y: range(rng, y0 + 16, y1 - 16), r: range(rng, 13, 20) });
+      }
+    }
   }
-  for (const s of city.spots.stashes) {
-    const f = findFreeSpot(city, s.x, s.y);
-    s.x = f.x; s.y = f.y;
+
+  // —— 橙色敞篷车（M2 目标）：固定停在中层街区路边，绝不随机。
+  city.parkedCars.push({
+    x: PLACES.convertibleSpot.x, y: PLACES.convertibleSpot.y, angle: Math.PI / 2,
+    type: 'convertible', color: '#ff8c1a', parked: true, taken: false, missionCar: true,
+  });
+
+  // —— 公园：小路、池塘、长椅、密树（树多到盖住草地）。
+  const park = city.park;
+  for (let i = 0; i < 26; i++) {
+    city.trees.push({
+      x: range(rng, park.x + 18, park.x + park.w - 18),
+      y: range(rng, park.y + 18, park.y + park.h - 18),
+      r: range(rng, 13, 22),
+    });
+  }
+  city.benches.push({ x: 760, y: 1380, angle: 0 }, { x: 1020, y: 1380, angle: 0 });
+  city.benches.push({ x: 760, y: 1580, angle: 0 }, { x: 1020, y: 1580, angle: Math.PI });
+  city.lamps.push({ x: 900, y: 1340 }, { x: 900, y: 1610 });
+
+  // —— 沙滩：两排棕榈 + 遮阳伞，沿着南岸种满。
+  for (let x = 420; x < 3050; x += 95) {
+    city.palms.push({ x: x + range(rng, -14, 14), y: range(rng, 2420, 2480), r: 16 });
+    if (rng() < 0.6) city.palms.push({ x: x + 48, y: range(rng, 2500, 2560), r: 15 });
+  }
+  // 街边也种棕榈（大道两侧）。
+  for (const rx of [700, 1500, 2300]) {
+    for (let y = 320; y < 2300; y += 340) {
+      city.palms.push({ x: rx - 78, y, r: 14 });
+    }
+  }
+
+  // —— 码头：长椅、路灯、货箱、游艇边的木桩；码头东岸补两棵棕榈。
+  city.benches.push({ x: 120, y: 1040, angle: Math.PI / 2 }, { x: 120, y: 1200, angle: Math.PI / 2 });
+  city.palms.push({ x: 345, y: 1050, r: 14 }, { x: 345, y: 1270, r: 15 });
+  city.lamps.push({ x: 90, y: 1080 }, { x: 90, y: 1180 }, { x: 270, y: 1125 });
+  city.crates.push({ x: 240, y: 1030, s: 26 }, { x: 245, y: 1062, s: 22 }, { x: 210, y: 1210, s: 24 });
+  city.crates.push({ x: 90, y: 1230, s: 20 });
+
+  // —— 隐藏现金点周围放一点标记物（小灌木），让玩家找得到。
+  for (const c of CASH_SPOTS) {
+    city.trees.push({ x: c.x + 34, y: c.y - 20, r: 12 });
   }
   return city;
 }
 
-// 从 (x,y) 出发螺旋找最近的可站空地（步行/任务点用）。
-export function findFreeSpot(city, x, y) {
-  for (let r = 0; r < 400; r += 24)
-    for (let a = 0; a < 6.28; a += 0.9) {
-      const nx = x + Math.cos(a) * r, ny = y + Math.sin(a) * r;
-      if (!cityCollides(city, nx, ny, 16)) return { x: nx, y: ny };
-    }
-  return { x, y };
-}
-
-// —— 街区填充：每种街区一种填法，全部填满不留空 ——
-function addBuilding(city, rng, x, y, w, h, floors, roof, neon) {
-  const cols = Math.max(2, Math.floor(w / 34)), rows = Math.max(2, Math.floor(h / 34));
-  const lit = [];
-  for (let i = 0; i < cols * rows; i++) lit.push(rng() < 0.55);
-  city.buildings.push({ x, y, w, h, floors, roof, cols, rows, lit, neon: neon || null });
-}
-function scatterTrees(city, rng, b, n, palmProb) {
-  for (let i = 0; i < n; i++)
-    city.trees.push({ x: range(rng, b.x0 + 24, b.x1 - 24), y: range(rng, b.y0 + 24, b.y1 - 24), r: range(rng, 10, 16), palm: rng() < palmProb });
-}
-function parkingRow(city, rng, x, y, n, angle, types) {
-  for (let i = 0; i < n; i++)
-    city.parked.push({ x: x + i * 58, y, angle, type: types[i % types.length] });
-}
-function buildDowntownBlock(city, rng, b) {
-  // 高楼群：2×2 共 4 栋塔楼（带间距的广场感）+ 霓虹招牌 + 树。
-  const bw = (b.x1 - b.x0 - 70) / 2, bh = (b.y1 - b.y0 - 70) / 2;
-  const spots2 = [[b.x0 + 20, b.y0 + 20], [b.x0 + 50 + bw, b.y0 + 20], [b.x0 + 20, b.y0 + 50 + bh], [b.x0 + 50 + bw, b.y0 + 50 + bh]];
-  for (let i = 0; i < 4; i++) {
-    const [x, y] = spots2[i];
-    addBuilding(city, rng, x, y, bw * range(rng, 0.85, 1), bh * range(rng, 0.85, 1), int(rng, 8, 14),
-      rng() < 0.5 ? PALETTE.roofGlass : pick(rng, ROOFS), rng() < 0.6 ? pick(rng, NEON_TEXT) : null);
+// —— 碰撞：楼、机库、水（码头木板除外）都挡路；沙滩与跑道可走。
+export function collidesCircle(city, x, y, r) {
+  for (const b of city.buildings) {
+    if (x + r > b.x && x - r < b.x + b.w && y + r > b.y && y - r < b.y + b.h) return true;
   }
-  scatterTrees(city, rng, b, 6, 0.4);
-  for (let i = 0; i < 4; i++) city.bushes.push({ x: range(rng, b.x0 + 20, b.x1 - 20), y: range(rng, b.y0 + 20, b.y1 - 20), r: range(rng, 7, 11) });
-}
-function buildMidBlock(city, rng, b) {
-  // 中层街区：3–5 栋中楼 + 停车场（停着的车）+ 树 + 灌木。
-  const n = int(rng, 3, 5);
-  const cols = n > 3 ? 3 : 2;
-  const cw = (b.x1 - b.x0) / cols, ch = (b.y1 - b.y0) / 2;
-  let placed = 0;
-  for (let gy = 0; gy < 2 && placed < n; gy++)
-    for (let gx = 0; gx < cols && placed < n; gx++) {
-      if (rng() < 0.18) continue; // 偶尔留一个停车位
-      addBuilding(city, rng, b.x0 + gx * cw + 14, b.y0 + gy * ch + 14,
-        cw - 28, ch - 28, int(rng, 2, 5), pick(rng, ROOFS), null);
-      placed++;
-    }
-  // 街区南侧一条停车带。
-  parkingRow(city, rng, b.x0 + 40, b.y1 - 34, int(rng, 3, 5), 0, ['sedan', 'pickup', 'taxi', 'van']);
-  scatterTrees(city, rng, b, 5, 0.5);
-  for (let i = 0; i < 3; i++) city.bushes.push({ x: range(rng, b.x0 + 20, b.x1 - 20), y: range(rng, b.y0 + 20, b.y1 - 20), r: range(rng, 6, 10) });
-  if (rng() < 0.35) city.pools.push({ x: b.x0 + 40, y: b.y0 + 40, w: 90, h: 55 }); // 青绿泳池
-}
-function buildBeachBlock(city, rng, b) {
-  // 南滩：低矮小屋 + 大量棕榈 + 泳池。
-  for (let i = 0; i < 3; i++)
-    addBuilding(city, rng, b.x0 + 30 + i * ((b.x1 - b.x0 - 60) / 3), b.y0 + 30, (b.x1 - b.x0) / 3 - 50, 110, 1, pick(rng, ROOFS), null);
-  scatterTrees(city, rng, b, 9, 0.85);
-  city.pools.push({ x: b.x0 + (b.x1 - b.x0) / 2 - 60, y: b.y1 - 120, w: 120, h: 60 });
-}
-function buildPark(city, rng, b) {
-  // 公园：小路十字 + 池塘 + 长椅 + 密树，取代空绿地。
-  city.parks = city.parks || [];
-  city.parks.push({ x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 });
-  city.pools.push({ x: (b.x0 + b.x1) / 2 - 70, y: (b.y0 + b.y1) / 2 - 45, w: 140, h: 90 });
-  scatterTrees(city, rng, b, 16, 0.3);
-  const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
-  city.benches.push({ x: cx - 90, y: cy - 60, a: 0 }, { x: cx + 90, y: cy + 60, a: Math.PI }, { x: cx, y: cy - 110, a: Math.PI / 2 });
-  for (let i = 0; i < 6; i++) city.bushes.push({ x: range(rng, b.x0 + 20, b.x1 - 20), y: range(rng, b.y0 + 20, b.y1 - 20), r: range(rng, 8, 13) });
-}
-function buildDocks(city, rng, b) {
-  // 东码头：集装箱堆 + 卡车 + Chop Shop 招牌楼。
-  for (let i = 0; i < 8; i++)
-    city.containers.push({ x: b.x0 + 30 + (i % 4) * 110, y: b.y0 + 30 + Math.floor(i / 4) * 90, w: 96, h: 70, c: pick(rng, ['#c65a4a', '#4f7fa8', '#d8a03c', '#5f8f5a']) });
-  addBuilding(city, rng, b.x0 + 30, b.y1 - 130, 200, 100, 2, PALETTE.roofTerra, 'CHOP SHOP');
-  parkingRow(city, rng, b.x0 + 300, b.y1 - 40, 3, 0, ['truck', 'van', 'pickup']);
-  scatterTrees(city, rng, b, 3, 0.2);
-}
-function buildAirport(city, rng, b) {
-  // 东南机场：跑道 + 航站楼 + 停机坪。
-  city.runway = { x0: b.x0 + 20, y0: b.y1 - 150, x1: b.x1 - 20, y1: b.y1 - 60 };
-  addBuilding(city, rng, b.x0 + 40, b.y0 + 30, 320, 130, 3, PALETTE.roofGlass, 'AIRPORT');
-  scatterTrees(city, rng, b, 4, 0.3);
-}
-
-// 每帧单独画的海面碎光（预渲染图上没有它）。
-export function drawGlints(ctx, city, time) {
-  for (const g of city.glints) {
-    const a = 0.25 + 0.55 * Math.abs(Math.sin(time * 1.4 + g.p));
-    ctx.fillStyle = `rgba(255,220,140,${a.toFixed(2)})`;
-    ctx.fillRect(g.x, g.y, g.s, 2);
-  }
-}
-
-// 一次性预渲染：把整座静态城市画进一张离屏大画布，每帧只贴可见区域。
-// 否则每帧要画几千个窗/树/斑点，软件渲染下只有 1–2 帧。
-export function prerenderCity(city) {
-  try {
-    const c = document.createElement('canvas');
-    c.width = WORLD.w; c.height = WORLD.h;
-    const ctx = c.getContext('2d');
-    drawCity(ctx, city, { x0: -100, y0: -100, x1: WORLD.w + 100, y1: WORLD.h + 100 }, 0, true);
-    city.staticCanvas = c;
-  } catch (e) { city.staticCanvas = null; }
-}
-export function cityCollides(city, x, y, r) {
-  if (x < 150 + r && !(x > city.pier.x0 - r && x < city.pier.x1 + r && y > city.pier.y0 - r && y < city.pier.y1 + r)) return true;
-  if (x < 0 || y < 0 || x > WORLD.w || y > WORLD.h) return true;
-  for (const b of city.buildings)
-    if (x > b.x - r && x < b.x + b.w + r && y > b.y - r && y < b.y + b.h + r) return true;
-  for (const p of city.pools)
-    if (x > p.x - r && x < p.x + p.w + r && y > p.y - r && y < p.y + p.h + r) return true;
-  for (const c of city.containers)
-    if (x > c.x - r && x < c.x + c.w + r && y > c.y - r && y < c.y + c.h + r) return true;
+  if (isWaterAt(x, y) && !onPierDeck(x, y)) return true;
   return false;
 }
-const inView = (v, x, y, m) => x > v.x0 - m && x < v.x1 + m && y > v.y0 - m && y < v.y1 + m;
 
-// —— 静态绘制：地面→水/沙→道路→公园→建筑（带长影与暖窗）→小品 ——
-// staticOnly=true 时跳过动画碎光（供一次性预渲染用）。
-export function drawCity(ctx, city, view, time, staticOnly = false) {
-  // 地面
-  ctx.fillStyle = PALETTE.grass; ctx.fillRect(view.x0, view.y0, view.x1 - view.x0, view.y1 - view.y0);
-  ctx.fillStyle = PALETTE.grassDark;
-  for (const s of city.speckles) if (inView(view, s.x, s.y, 10)) { ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.29); ctx.fill(); }
-  // 西边海水 + 沙滩
-  if (view.x0 < 320) {
-    ctx.fillStyle = PALETTE.water; ctx.fillRect(view.x0, view.y0, Math.min(150, view.x1) - view.x0, view.y1 - view.y0);
-    ctx.fillStyle = PALETTE.waterDeep; ctx.fillRect(view.x0, view.y0, Math.min(60, view.x1) - view.x0, view.y1 - view.y0);
-    ctx.fillStyle = PALETTE.sand; ctx.fillRect(150, view.y0, 150, view.y1 - view.y0);
-    // 海面阳光碎光（动画闪烁；预渲染时跳过，由每帧单独画）
-    if (!staticOnly) for (const g of city.glints) {
-      const a = 0.25 + 0.55 * Math.abs(Math.sin(time * 1.4 + g.p));
-      ctx.fillStyle = `rgba(255,220,140,${a.toFixed(2)})`;
-      ctx.fillRect(g.x, g.y, g.s, 2);
+export function isWaterAt(x, y) {
+  return x < SEA_X && !(x >= PIER.x0 && x <= PIER.x1 && y >= PIER.y0 && y <= PIER.y1);
+}
+
+export function onPierDeck(x, y) {
+  return x >= PIER.x0 && x <= PIER.x1 && y >= PIER.y0 && y <= PIER.y1;
+}
+
+// 离某点最近的、还没被开走的停着的车。
+export function nearestParkedCar(city, x, y, maxDist) {
+  let best = null, bestD = maxDist;
+  for (const c of city.parkedCars) {
+    if (c.taken) continue;
+    const d = Math.hypot(c.x - x, c.y - y);
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  return best;
+}
+
+// —— 静态预渲染：整座城市画进一张离屏画布，只画一次。
+export function prerenderCity(city) {
+  const cv = document.createElement('canvas');
+  cv.width = WORLD.w;
+  cv.height = WORLD.h;
+  const g = cv.getContext('2d');
+  const rng = makeRng(city.seed + 77);
+
+  // 暖色地面：金色黄昏下的草地与土路底色。
+  g.fillStyle = '#b3945a';
+  g.fillRect(0, 0, WORLD.w, WORLD.h);
+  // 地面杂色斑点（很淡，只为不平板）。
+  for (let i = 0; i < 2600; i++) {
+    g.fillStyle = rng() < 0.5 ? 'rgba(120,90,40,0.05)' : 'rgba(230,200,120,0.05)';
+    g.fillRect(rng() * WORLD.w, rng() * WORLD.h, range(rng, 6, 26), range(rng, 4, 14));
+  }
+
+  // 海洋：西侧深蓝到浅青的渐变。
+  const sea = g.createLinearGradient(0, 0, SEA_X, 0);
+  sea.addColorStop(0, '#1d5f7a');
+  sea.addColorStop(1, '#3f8ea8');
+  g.fillStyle = sea;
+  g.fillRect(0, 0, SEA_X, WORLD.h);
+  // 海面碎光底色：静态的亮点，动态闪烁由每帧另画。
+  for (let i = 0; i < 130; i++) {
+    g.fillStyle = 'rgba(255,230,160,0.20)';
+    g.fillRect(range(rng, 6, SEA_X - 12), rng() * WORLD.h, range(rng, 3, 9), 2);
+  }
+  // 沙滩：南侧暖沙色。
+  g.fillStyle = '#e0c184';
+  g.fillRect(300, BEACH_Y, WORLD.w - 300, WORLD.h - BEACH_Y);
+  g.fillStyle = 'rgba(255,240,200,0.35)';
+  g.fillRect(300, BEACH_Y, WORLD.w - 300, 10);
+
+  // 机场跑道：深灰长条 + 白色虚线。
+  g.fillStyle = '#4a4a52';
+  g.fillRect(city.runway.x, city.runway.y, city.runway.w, city.runway.h);
+  g.fillStyle = '#f2f2f2';
+  for (let y = city.runway.y + 20; y < city.runway.y + city.runway.h - 20; y += 46) {
+    g.fillRect(city.runway.x + city.runway.w / 2 - 3, y, 6, 26);
+  }
+
+  // 公园草地：比周围更绿的草皮 + 小路 + 池塘。
+  const park = city.park;
+  g.fillStyle = '#7da95c';
+  g.fillRect(park.x, park.y, park.w, park.h);
+  g.strokeStyle = '#d9c48f';
+  g.lineWidth = 12;
+  g.beginPath();
+  g.moveTo(park.x, park.y + park.h / 2);
+  g.lineTo(park.x + park.w, park.y + park.h / 2);
+  g.moveTo(park.x + park.w / 2, park.y);
+  g.lineTo(park.x + park.w / 2, park.y + park.h);
+  g.stroke();
+  g.fillStyle = '#4d8fb5';
+  g.beginPath();
+  g.ellipse(park.pond.x, park.pond.y, park.pond.rx, park.pond.ry, 0, 0, Math.PI * 2);
+  g.fill();
+  g.fillStyle = 'rgba(255,255,255,0.25)';
+  g.beginPath();
+  g.ellipse(park.pond.x - 22, park.pond.y - 12, 34, 12, -0.3, 0, Math.PI * 2);
+  g.fill();
+
+  // 道路：暖褐沥青 + 浅色人行道边 + 中央虚线 + 路口斑马线。
+  for (const x of ROADS_X) {
+    g.fillStyle = '#c9b083';
+    g.fillRect(x - ROAD_W / 2 - 10, 0, ROAD_W + 20, WORLD.h);
+    g.fillStyle = '#6b5847';
+    g.fillRect(x - ROAD_W / 2, 0, ROAD_W, WORLD.h);
+  }
+  for (const y of ROADS_Y) {
+    g.fillStyle = '#c9b083';
+    g.fillRect(0, y - ROAD_W / 2 - 10, WORLD.w, ROAD_W + 20);
+    g.fillStyle = '#6b5847';
+    g.fillRect(0, y - ROAD_W / 2, WORLD.w, ROAD_W);
+  }
+  g.fillStyle = '#e8d9a0';
+  for (const x of ROADS_X) {
+    for (let y = 40; y < WORLD.h; y += 90) {
+      let onCross = false;
+      for (const ry of ROADS_Y) if (Math.abs(y - ry) < ROAD_W) onCross = true;
+      if (!onCross) g.fillRect(x - 3, y, 6, 42);
     }
-    // 码头木栈道
-    const p = city.pier;
-    ctx.fillStyle = PALETTE.pierWood; ctx.fillRect(p.x0, p.y0, p.x1 - p.x0, p.y1 - p.y0);
-    ctx.strokeStyle = 'rgba(90,60,30,0.6)'; ctx.lineWidth = 2;
-    for (let x = p.x0 + 20; x < p.x1; x += 28) { ctx.beginPath(); ctx.moveTo(x, p.y0); ctx.lineTo(x, p.y1); ctx.stroke(); }
-    // 游艇
-    for (const y of city.yachts) {
-      ctx.save(); ctx.translate(y.x, y.y); ctx.rotate(y.a);
-      ctx.fillStyle = '#f4f0e4'; ctx.beginPath(); ctx.ellipse(0, 0, 34, 12, 0, 0, 6.29); ctx.fill();
-      ctx.fillStyle = '#7fb3d8'; ctx.fillRect(-8, -8, 18, 8);
-      ctx.restore();
+  }
+  for (const y of ROADS_Y) {
+    for (let x = 320; x < WORLD.w; x += 90) {
+      let onCross = false;
+      for (const rx of ROADS_X) if (Math.abs(x - rx) < ROAD_W) onCross = true;
+      if (!onCross) g.fillRect(x, y - 3, 42, 6);
     }
   }
-  // 道路：暖沥青 + 人行道边 + 车道虚线 + 路口斑马线
-  ctx.fillStyle = PALETTE.road;
-  for (const x of AVENUES) ctx.fillRect(x - ROAD_W / 2, 0, ROAD_W, WORLD.h);
-  for (const y of STREETS) ctx.fillRect(0, y - ROAD_W / 2, WORLD.w, ROAD_W);
-  ctx.fillStyle = PALETTE.sidewalk;
-  for (const x of AVENUES) { ctx.fillRect(x - ROAD_W / 2 - 10, 0, 10, WORLD.h); ctx.fillRect(x + ROAD_W / 2, 0, 10, WORLD.h); }
-  for (const y of STREETS) { ctx.fillRect(0, y - ROAD_W / 2 - 10, WORLD.w, 10); ctx.fillRect(0, y + ROAD_W / 2, WORLD.w, 10); }
-  ctx.fillStyle = PALETTE.lane;
-  for (const x of AVENUES) for (let y = 30; y < WORLD.h; y += 90) ctx.fillRect(x - 3, y, 6, 44);
-  for (const y of STREETS) for (let x = 30; x < WORLD.w; x += 90) ctx.fillRect(x, y - 3, 44, 6);
-  ctx.fillStyle = 'rgba(240,230,200,0.85)';
-  for (const x of AVENUES) for (const y of STREETS)
-    for (let i = -3; i < 4; i++) ctx.fillRect(x + i * 16 - 5, y - ROAD_W / 2 - 4, 10, ROAD_W + 8);
-  // 机场跑道
-  if (city.runway) {
-    const r = city.runway;
-    ctx.fillStyle = '#5a5148'; ctx.fillRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
-    ctx.fillStyle = '#f2d38a';
-    for (let x = r.x0 + 30; x < r.x1 - 30; x += 80) ctx.fillRect(x, (r.y0 + r.y1) / 2 - 3, 40, 6);
-  }
-  // 公园：深绿底 + 小路十字
-  if (city.parks) for (const p of city.parks) {
-    ctx.fillStyle = '#8fa04e'; ctx.fillRect(p.x0, p.y0, p.x1 - p.x0, p.y1 - p.y0);
-    ctx.fillStyle = '#d9c08a';
-    ctx.fillRect((p.x0 + p.x1) / 2 - 8, p.y0, 16, p.y1 - p.y0);
-    ctx.fillRect(p.x0, (p.y0 + p.y1) / 2 - 8, p.x1 - p.x0, 16);
-  }
-  // 泳池：青绿 + 白边 + 碎光
-  for (const p of city.pools) {
-    ctx.fillStyle = '#efe8d8'; ctx.fillRect(p.x - 4, p.y - 4, p.w + 8, p.h + 8);
-    ctx.fillStyle = '#4fc3c0'; ctx.fillRect(p.x, p.y, p.w, p.h);
-    ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.fillRect(p.x + 8, p.y + 6, p.w - 20, 4);
-  }
-  // 集装箱
-  for (const c of city.containers) {
-    ctx.fillStyle = PALETTE.shadow; ctx.fillRect(c.x + 14, c.y + 8, c.w, c.h);
-    ctx.fillStyle = c.c; ctx.fillRect(c.x, c.y, c.w, c.h);
-    ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 2;
-    for (let i = 1; i < 4; i++) { ctx.beginPath(); ctx.moveTo(c.x + i * c.w / 4, c.y); ctx.lineTo(c.x + i * c.w / 4, c.y + c.h); ctx.stroke(); }
-  }
-  // 建筑：长影（朝东，影长约楼高 2 倍）→ 楼体 → 暖窗 → 霓虹招牌
-  for (const b of city.buildings) {
-    if (!inView(view, b.x + b.w / 2, b.y + b.h / 2, 200)) continue;
-    const shX = b.floors * 13, shY = b.floors * 4; // 影子向东拉长
-    ctx.fillStyle = PALETTE.shadow;
-    ctx.fillRect(b.x + shX, b.y + shY, b.w, b.h);
-    ctx.fillStyle = b.roof; ctx.fillRect(b.x, b.y, b.w, b.h);
-    ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(b.x, b.y, b.w, 6);
-    ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.fillRect(b.x, b.y + b.h - 6, b.w, 6);
-    const cw = b.w / b.cols, ch = b.h / b.rows;
-    for (let r = 0; r < b.rows; r++) for (let c = 0; c < b.cols; c++) {
-      ctx.fillStyle = b.lit[r * b.cols + c] ? PALETTE.windowLit : PALETTE.windowDark;
-      ctx.fillRect(b.x + c * cw + cw * 0.28, b.y + r * ch + ch * 0.28, cw * 0.44, ch * 0.44);
-    }
-    // 屋顶设备
-    ctx.fillStyle = 'rgba(0,0,0,0.2)'; ctx.fillRect(b.x + b.w * 0.15, b.y + b.h * 0.15, 14, 10);
-    if (b.neon) {
-      ctx.save();
-      ctx.shadowColor = b.neon.includes('SHOP') ? PALETTE.neonPink : PALETTE.neonCyan;
-      ctx.shadowBlur = 16;
-      ctx.fillStyle = b.neon.includes('SHOP') ? PALETTE.neonPink : PALETTE.neonCyan;
-      ctx.font = 'bold 20px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(b.neon, b.x + b.w / 2, b.y + b.h / 2 + 7);
-      ctx.restore();
-    }
-  }
-  // 广告牌
-  for (const b of city.billboards) {
-    if (!inView(view, b.x, b.y, 80)) continue;
-    ctx.fillStyle = PALETTE.shadow; ctx.fillRect(b.x + 10, b.y + 6, 84, 44);
-    ctx.fillStyle = '#2c2620'; ctx.fillRect(b.x, b.y, 84, 44);
-    ctx.fillStyle = b.color; ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText(b.text, b.x + 42, b.y + 28);
-  }
-  // 长椅
-  ctx.fillStyle = '#8a6a42';
-  for (const b of city.benches) { ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(b.a); ctx.fillRect(-16, -5, 32, 10); ctx.restore(); }
-  // 灌木
-  for (const b of city.bushes) {
-    if (!inView(view, b.x, b.y, 30)) continue;
-    ctx.fillStyle = PALETTE.shadow; ctx.beginPath(); ctx.ellipse(b.x + 8, b.y + 5, b.r, b.r * 0.7, 0, 0, 6.29); ctx.fill();
-    ctx.fillStyle = '#6f8f3e'; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 6.29); ctx.fill();
-    ctx.fillStyle = '#86a84e'; ctx.beginPath(); ctx.arc(b.x - 3, b.y - 3, b.r * 0.6, 0, 6.29); ctx.fill();
-  }
-  // 树：长影 + 树冠（棕榈画扇叶）
-  for (const t of city.trees) {
-    if (!inView(view, t.x, t.y, 40)) continue;
-    ctx.fillStyle = PALETTE.shadow;
-    ctx.beginPath(); ctx.ellipse(t.x + 20, t.y + 8, t.r * 1.2, t.r * 0.7, 0, 0, 6.29); ctx.fill();
-    if (t.palm) {
-      ctx.strokeStyle = '#7a5a34'; ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.moveTo(t.x, t.y + 6); ctx.lineTo(t.x, t.y - 6); ctx.stroke();
-      ctx.fillStyle = '#5d8f3e';
-      for (let i = 0; i < 6; i++) {
-        const a = i * 1.05 + 0.4;
-        ctx.beginPath(); ctx.ellipse(t.x + Math.cos(a) * t.r * 0.8, t.y - 4 + Math.sin(a) * t.r * 0.8, t.r * 0.75, 5, a, 0, 6.29); ctx.fill();
+  // 斑马线：每个路口四条。
+  g.fillStyle = 'rgba(240,235,220,0.85)';
+  for (const x of ROADS_X) {
+    for (const y of ROADS_Y) {
+      for (let i = -3; i <= 3; i++) {
+        g.fillRect(x + i * 16 - 5, y - ROAD_W / 2 - 4, 10, 8);
+        g.fillRect(x + i * 16 - 5, y + ROAD_W / 2 - 4, 10, 8);
       }
-    } else {
-      ctx.fillStyle = '#5d8f3e'; ctx.beginPath(); ctx.arc(t.x, t.y, t.r, 0, 6.29); ctx.fill();
-      ctx.fillStyle = '#74a84e'; ctx.beginPath(); ctx.arc(t.x - 4, t.y - 4, t.r * 0.65, 0, 6.29); ctx.fill();
     }
   }
-  // 路灯：杆 + 暖光晕
-  for (const l of city.lamps) {
-    if (!inView(view, l.x, l.y, 20)) continue;
-    ctx.fillStyle = '#3a332c'; ctx.fillRect(l.x - 2, l.y - 2, 4, 4);
-    ctx.fillStyle = 'rgba(255,210,120,0.85)'; ctx.beginPath(); ctx.arc(l.x, l.y, 4, 0, 6.29); ctx.fill();
-    ctx.fillStyle = 'rgba(255,210,120,0.18)'; ctx.beginPath(); ctx.arc(l.x, l.y, 12, 0, 6.29); ctx.fill();
+
+  // 码头木板：横向木纹 + 边缘桩。
+  g.fillStyle = '#8a6a42';
+  g.fillRect(PIER.x0, PIER.y0, PIER.x1 - PIER.x0, PIER.y1 - PIER.y0);
+  g.strokeStyle = 'rgba(60,40,20,0.5)';
+  g.lineWidth = 2;
+  for (let y = PIER.y0 + 14; y < PIER.y1; y += 18) {
+    g.beginPath(); g.moveTo(PIER.x0, y); g.lineTo(PIER.x1, y); g.stroke();
   }
+  g.fillStyle = '#5d4426';
+  for (let x = PIER.x0 + 12; x < PIER.x1; x += 40) {
+    g.fillRect(x, PIER.y0 - 4, 8, 10);
+    g.fillRect(x, PIER.y1 - 6, 8, 10);
+  }
+
+  // 楼：同向长影（太阳在西边，影子向东偏南拉长）+ 楼体 + 暖色亮窗。
+  for (const b of city.buildings) {
+    // 长影。
+    g.fillStyle = 'rgba(40,20,5,0.28)';
+    g.fillRect(b.x + 20, b.y + 14, b.w, b.h);
+    // 楼体与屋顶边。
+    g.fillStyle = b.fill;
+    g.fillRect(b.x, b.y, b.w, b.h);
+    g.strokeStyle = 'rgba(255,255,255,0.35)';
+    g.lineWidth = 3;
+    g.strokeRect(b.x + 1.5, b.y + 1.5, b.w - 3, b.h - 3);
+    // 窗户：暖黄亮窗与深色窗交错，塔楼窗户更密。
+    const brng = makeRng(b.seed);
+    const cols = Math.max(2, Math.floor(b.w / (b.tower ? 34 : 44)));
+    const rows = Math.max(2, Math.floor(b.h / (b.tower ? 34 : 44)));
+    const cw = b.w / cols, ch = b.h / rows;
+    for (let i = 0; i < cols; i++) {
+      for (let j = 0; j < rows; j++) {
+        const lit = brng() < 0.62;
+        g.fillStyle = lit ? '#ffd98a' : '#4a3a2e';
+        g.fillRect(b.x + i * cw + cw * 0.22, b.y + j * ch + ch * 0.24, cw * 0.56, ch * 0.52);
+      }
+    }
+    // 霓虹招牌：画在楼体中下部（避开顶部任务横幅的区域），带光晕。
+    if (b.neon) {
+      g.save();
+      g.font = `bold ${b.tower ? 44 : 30}px Arial, sans-serif`;
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.shadowColor = b.neon.color;
+      g.shadowBlur = 22;
+      g.fillStyle = b.neon.color;
+      g.fillText(b.neon.text, b.x + b.w / 2, b.y + b.h * 0.62);
+      g.restore();
+    }
+  }
+
+  // 树与棕榈：同向小影 + 树冠；公园里的树画得更密更大。
+  for (const t of city.trees) {
+    g.fillStyle = 'rgba(40,20,5,0.22)';
+    g.beginPath(); g.ellipse(t.x + 10, t.y + 7, t.r, t.r * 0.55, 0, 0, Math.PI * 2); g.fill();
+    g.fillStyle = '#4e8a3f';
+    g.beginPath(); g.arc(t.x, t.y, t.r, 0, Math.PI * 2); g.fill();
+    g.fillStyle = '#6fb054';
+    g.beginPath(); g.arc(t.x - t.r * 0.3, t.y - t.r * 0.3, t.r * 0.55, 0, Math.PI * 2); g.fill();
+  }
+  for (const p of city.palms) {
+    g.fillStyle = 'rgba(40,20,5,0.22)';
+    g.beginPath(); g.ellipse(p.x + 12, p.y + 8, p.r, p.r * 0.5, 0, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = '#7a5a34';
+    g.lineWidth = 5;
+    g.beginPath(); g.moveTo(p.x, p.y + 6); g.lineTo(p.x + 3, p.y - 12); g.stroke();
+    g.fillStyle = '#3f8a4f';
+    for (let f = 0; f < 6; f++) {
+      const a = (f / 6) * Math.PI * 2;
+      g.beginPath();
+      g.ellipse(p.x + Math.cos(a) * p.r * 0.7, p.y - 12 + Math.sin(a) * p.r * 0.55, p.r * 0.75, p.r * 0.28, a, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+
+  // 长椅、货箱、路灯：小道具，码头与公园才有。
+  for (const b of city.benches) {
+    g.save();
+    g.translate(b.x, b.y);
+    g.rotate(b.angle);
+    g.fillStyle = '#7a5230';
+    g.fillRect(-18, -6, 36, 12);
+    g.fillStyle = '#5d3d22';
+    g.fillRect(-18, -10, 36, 4);
+    g.restore();
+  }
+  for (const c of city.crates) {
+    g.fillStyle = '#a9803e';
+    g.fillRect(c.x, c.y, c.s, c.s);
+    g.strokeStyle = '#6e4f1e';
+    g.lineWidth = 2;
+    g.strokeRect(c.x, c.y, c.s, c.s);
+    g.beginPath(); g.moveTo(c.x, c.y); g.lineTo(c.x + c.s, c.y + c.s); g.stroke();
+  }
+  for (const l of city.lamps) {
+    g.fillStyle = 'rgba(40,20,5,0.25)';
+    g.beginPath(); g.ellipse(l.x + 8, l.y + 5, 10, 5, 0, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = '#3a3a3a';
+    g.lineWidth = 4;
+    g.beginPath(); g.moveTo(l.x, l.y + 8); g.lineTo(l.x, l.y - 16); g.stroke();
+    g.fillStyle = '#ffe9a8';
+    g.beginPath(); g.arc(l.x, l.y - 18, 6, 0, Math.PI * 2); g.fill();
+  }
+
+  // 游艇：停在码头边的白色船体（靠南放，2-pier 截图上沿能看到它）。
+  g.fillStyle = '#f2f0e8';
+  g.beginPath(); g.ellipse(120, 985, 62, 22, 0.15, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#c9d6de';
+  g.fillRect(95, 957, 50, 22);
+  g.fillStyle = '#2e6fd8';
+  g.fillRect(108, 943, 26, 14);
+
+  return cv;
 }

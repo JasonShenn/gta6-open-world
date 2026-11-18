@@ -1,157 +1,236 @@
-// tests/playtest.mjs — 16 项玩法检查（Playwright 真实浏览器操作）。
-// 覆盖：无 console 报错、无 failed request、走路、上车、偷车涨通缉到 2 星、驾驶加速、
-// 4 辆警车追捕、开枪耗弹药涨热度、M1 两段推进到完成并付 $150、P 暂停、自动存档、HUD、
-// 现金点、M 静音、标题画面 Continue。全部通过才算过。
-// 等待一律用 waitForFunction 等状态达成（不依赖固定时长，帧率低也不 flaky）。
+// playtest.mjs — GOLDEN TIDE v4 的玩法测试：Playwright 真实浏览器跑 16 项。
+// 跑法：node tests/playtest.mjs（自动起 serve.ts 8129 端口，跑完关掉）。
+
 import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { existsSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 
-const CHROME = process.env.CHROME_PATH || `${process.env.HOME}/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome`;
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, '..');
 const PORT = 8129;
-const results = [];
-function check(name, ok, detail = '') {
-  results.push({ name, ok: !!ok });
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ' — ' + detail : ''}`);
-}
-function waitForServer(url, tries = 40) {
-  return new Promise((resolve, reject) => {
-    const tick = async () => {
-      try { const r = await fetch(url); if (r.ok) return resolve(); } catch {}
-      if (--tries <= 0) return reject(new Error('server did not start'));
-      setTimeout(tick, 250);
-    };
-    tick();
-  });
-}
-// 等某个页面状态为真（超时返回 false，不抛错，由 check 判 FAIL）。
-async function waitState(page, fn, timeout = 12000, arg = undefined) {
-  try { await page.waitForFunction(fn, arg, { timeout }); return true; }
-  catch { return false; }
+
+// 找到本机 Playwright 的 Chromium 可执行文件。
+function findChrome() {
+  const base = join(homedir(), '.cache', 'ms-playwright');
+  if (!existsSync(base)) return undefined;
+  for (const d of readdirSync(base)) {
+    if (!d.startsWith('chromium-')) continue;
+    for (const sub of ['chrome-linux64/chrome', 'chrome-linux/chrome', 'chrome-mac/Chromium.app/Contents/MacOS/Chromium']) {
+      const p = join(base, d, sub);
+      if (existsSync(p)) return p;
+    }
+  }
+  return undefined;
 }
 
-const server = spawn('node', ['serve.ts', '--port', String(PORT)], { cwd: new URL('..', import.meta.url).pathname, stdio: 'ignore' });
+const results = [];
+function check(name, ok, detail) {
+  results.push({ name, ok: !!ok, detail: detail || '' });
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+}
+
+const server = spawn('node', ['serve.ts', '--port', String(PORT)], { cwd: repo, stdio: 'ignore' });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 let browser;
 try {
-  await waitForServer(`http://127.0.0.1:${PORT}/index.html`);
+  await sleep(1200);
   browser = await chromium.launch({
-    executablePath: CHROME,
-    args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
+    executablePath: findChrome(),
+    args: ['--no-sandbox', '--disable-gpu-sandbox', '--use-gl=swiftshader'],
   });
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
-  const errors = [], failedReqs = [];
-  page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
-  page.on('pageerror', e => errors.push(String(e)));
-  page.on('requestfailed', r => failedReqs.push(r.url()));
+  const consoleErrors = [];
+  const failedRequests = [];
+  page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+  page.on('pageerror', (e) => consoleErrors.push(String(e)));
+  page.on('requestfailed', (r) => failedRequests.push(r.url()));
 
-  await page.goto(`http://127.0.0.1:${PORT}/index.html`, { waitUntil: 'networkidle' });
-  await page.waitForTimeout(1500);
-  // 1–2. 干净启动
-  check('1. no console errors', errors.length === 0, errors.join(' | ').slice(0, 200));
-  check('2. no failed requests', failedReqs.length === 0, failedReqs.join(' | ').slice(0, 200));
-  // 3. 开始游戏并走路
-  await page.click('#btn-start');
-  await page.waitForTimeout(300);
-  const p0 = await page.evaluate(() => ({ x: window.GT.state.player.x, y: window.GT.state.player.y }));
-  await page.keyboard.down('KeyW');
-  const walked = await waitState(page, ([x, y]) => {
-    const p = window.GT.state.player;
-    return Math.hypot(p.x - x, p.y - y) > 20;
-  }, 12000, [p0.x, p0.y]);
-  await page.keyboard.up('KeyW');
-  const p1 = await page.evaluate(() => ({ x: window.GT.state.player.x, y: window.GT.state.player.y }));
-  check('3. walk moves player', walked, `moved ${Math.round(Math.hypot(p1.x - p0.x, p1.y - p0.y))}u`);
-  // 4–5. 上车偷车（轿车在出生点旁）
-  await page.evaluate(() => window.GT.teleport(670, 1860));
-  await page.waitForTimeout(200);
-  await page.keyboard.press('KeyE');
-  const inCar = await waitState(page, () => !!window.GT.state.player.car);
-  check('4. enter car with E', inCar);
-  const wanted = await page.evaluate(() => window.GT.state.wanted);
-  check('5. stealing raises wanted to 2', wanted === 2, `wanted=${wanted}`);
-  // 6. 驾驶加速
-  await page.keyboard.down('KeyW');
-  const fast = await waitState(page, () => Math.abs(window.GT.state.player.car?.speed || 0) > 100);
-  await page.keyboard.up('KeyW');
-  const speed = await page.evaluate(() => Math.abs(window.GT.state.player.car?.speed || 0));
-  check('6. driving accelerates', fast && speed > 50, `speed=${Math.round(speed)}`);
-  // 7. 4 辆警车追捕（通缉 4 星）
-  await page.evaluate(() => window.GT.setWanted(4));
-  const cops = await waitState(page, () => window.GT.state.police.length >= 4, 20000);
-  const copN = await page.evaluate(() => window.GT.state.police.length);
-  check('7. four police chase at 4 stars', cops, `police=${copN}`);
-  // 8–9. 下车开枪：耗弹药、涨热度
-  await page.keyboard.press('KeyE'); // 下车
-  await waitState(page, () => !window.GT.state.player.car);
-  await page.evaluate(() => window.GT.setWanted(0));
-  const ammo0 = await page.evaluate(() => window.GT.state.player.ammo);
-  await page.mouse.move(900, 300);
-  await page.mouse.down();
-  const shot = await waitState(page, a => window.GT.state.player.ammo < a, 8000, ammo0);
-  await page.mouse.up();
-  const ammo1 = await page.evaluate(() => window.GT.state.player.ammo);
-  const wanted2 = await page.evaluate(() => window.GT.state.wanted);
-  check('8. shooting consumes ammo', shot && ammo1 < ammo0, `${ammo0} -> ${ammo1}`);
-  check('9. shooting raises wanted', wanted2 >= 1, `wanted=${wanted2}`);
-  // 清场：甩掉警车并回满血，后续测试不再被追捕打死（BUSTED 会停掉 update）。
-  await page.evaluate(() => { window.GT.clearCops(); window.GT.heal(); });
-  // 10. M1 两段推进：取包 → 送 Mara → 完成付 $150
-  const money0 = await page.evaluate(() => window.GT.state.money);
-  await page.evaluate(() => {
-    window.GT.startMission('M1');
-    const sp = window.GT.state.city.spots;
-    window.GT.teleport(sp.pierPickup.x, sp.pierPickup.y);
-  });
-  const stage1 = await waitState(page, () => window.GT.state.mission?.stage === 1);
-  await page.evaluate(() => {
-    const sp = window.GT.state.city.spots;
-    window.GT.teleport(sp.mara.x, sp.mara.y);
-  });
-  const m1done = await waitState(page, () => window.GT.state.done.includes('M1'));
-  const m1 = await page.evaluate(() => ({ done: window.GT.state.done, money: window.GT.state.money }));
-  check('10. M1 advances stages, completes and pays $150', stage1 && m1done && m1.money >= money0 + 150, `stage1=${stage1} money ${money0} -> ${m1.money}`);
-  // 11. P 暂停：时间冻结
-  await page.keyboard.press('KeyP');
-  const pausedOk = await waitState(page, () => window.GT.state.paused);
-  const t0 = await page.evaluate(() => window.GT.state.time);
-  await page.waitForTimeout(800);
-  const t1 = await page.evaluate(() => window.GT.state.time);
-  check('11. P pauses the game', pausedOk && t1 === t0, `paused=${pausedOk} time ${t0} -> ${t1}`);
-  await page.keyboard.press('KeyP');
-  await waitState(page, () => !window.GT.state.paused);
-  // 12. 自动存档写 localStorage
-  const saved = await waitState(page, () => !!localStorage.getItem('golden-tide-save-v3'), 15000);
-  check('12. autosave writes localStorage', saved);
-  // 13. HUD 正常
-  const hud = await page.evaluate(() => ({
-    money: document.getElementById('hud-money').textContent,
-    wanted: document.getElementById('hud-wanted').textContent,
-    obj: document.getElementById('hud-objective').textContent,
-    map: !!document.getElementById('minimap'),
-  }));
-  check('13. HUD shows money/stars/objective/minimap', hud.money.startsWith('$') && hud.wanted.includes('WANTED') && hud.obj.length > 5 && hud.map, JSON.stringify(hud).slice(0, 120));
-  // 14. 隐藏现金点拾取
-  const cash0 = await page.evaluate(() => window.GT.state.cashFound);
-  await page.evaluate(() => {
-    const s = window.GT.state.stashes[0];
-    window.GT.teleport(s.x, s.y);
-  });
-  const cashGot = await waitState(page, c => window.GT.state.cashFound > c, 8000, cash0);
-  const cash1 = await page.evaluate(() => window.GT.state.cashFound);
-  check('14. hidden cash stash collected', cashGot, `${cash0} -> ${cash1}`);
-  // 15. M 静音开关
-  await page.keyboard.press('KeyM');
-  const muted = await waitState(page, () => window.GT.state.sfx.muted);
-  await page.keyboard.press('KeyM');
-  check('15. M toggles mute', muted, `muted=${muted}`);
-  // 16. 重载后标题画面显示 Continue
-  await page.reload({ waitUntil: 'networkidle' });
-  const contVisible = await waitState(page, () => getComputedStyle(document.getElementById('btn-continue')).display !== 'none', 8000);
-  check('16. title shows Continue after save', contVisible);
+  await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'load' });
+  await page.waitForFunction(() => window.__game && window.__game.world, null, { timeout: 15000 });
+  await sleep(800);
 
-  const failed = results.filter(r => !r.ok);
-  console.log(`\nplaytest: ${results.length - failed.length}/${results.length} passed`);
-  if (failed.length) process.exit(1);
+  const state = () => page.evaluate(() => window.__game.state());
+  const shot = () => page.evaluate(() => window.__game.state());
+
+  // 1. 标题画面出现。
+  {
+    const visible = await page.isVisible('#overlay-title');
+    const title = await page.textContent('#overlay-title');
+    check('title screen shows', visible && title.includes('GOLDEN TIDE'));
+  }
+
+  // 2. 点 New Game 进入游玩。
+  {
+    await page.click('#overlay-buttons button[data-act="new"]');
+    await sleep(600);
+    const s = await state();
+    check('new game starts play mode', s.mode === 'play', `mode=${s.mode}`);
+  }
+
+  // 3. 走路：按住 W，位置移动。
+  {
+    const a = await state();
+    await page.keyboard.down('KeyW');
+    await sleep(1200);
+    await page.keyboard.up('KeyW');
+    const b = await state();
+    const moved = Math.hypot(b.x - a.x, b.y - a.y);
+    check('walk moves player', moved > 40, `moved ${Math.round(moved)}px`);
+  }
+
+  // 4. 开枪耗弹药（步行，鼠标朝右按住一会儿）。
+  {
+    const a = await state();
+    await page.mouse.move(900, 360);
+    await page.mouse.down();
+    await sleep(500);
+    await page.mouse.up();
+    const b = await state();
+    check('shooting consumes ammo', b.ammo < a.ammo, `ammo ${a.ammo} → ${b.ammo}`);
+  }
+
+  // 5. 隐藏现金点拾取（第 1 处，路边）。
+  {
+    await page.evaluate(() => window.__game.teleport(700, 470));
+    await sleep(600);
+    const s = await state();
+    check('hidden cash pickup', s.cashFound >= 1 && s.money >= 270, `cash ${s.cashFound}/5 money $${s.money}`);
+  }
+
+  // 6. 上车：瞬移到一辆停着的车边按 E。
+  {
+    const spot = await page.evaluate(() => {
+      const c = window.__game.world.city.parkedCars.find((x) => !x.taken);
+      return c ? { x: c.x, y: c.y } : null;
+    });
+    await page.evaluate((s) => window.__game.teleport(s.x + 30, s.y), spot);
+    await sleep(300);
+    await page.keyboard.press('KeyE');
+    await sleep(500);
+    const s = await state();
+    check('enter parked car', s.inCar === true, `inCar=${s.inCar} car=${s.carType}`);
+  }
+
+  // 7. 偷车涨通缉到 2 星。
+  {
+    const s = await state();
+    check('stealing raises wanted to 2', s.wanted >= 2, `wanted=${s.wanted}`);
+  }
+
+  // 8. 驾驶加速：按住 W，车速上来。
+  {
+    await page.keyboard.down('KeyW');
+    await sleep(2500);
+    await page.keyboard.up('KeyW');
+    const s = await state();
+    check('driving accelerates', s.speedKmh > 50, `${s.speedKmh} km/h`);
+  }
+
+  // 9. 警车追捕：设 3 星，出警车。
+  {
+    await page.evaluate(() => window.__game.setWanted(3));
+    await sleep(1500);
+    const s = await state();
+    check('police chase spawns cars', s.policeCars >= 2, `${s.policeCars} police cars`);
+    await page.evaluate(() => window.__game.setWanted(0));
+  }
+
+  // 10. M1 完成并付 $150：先去码头取包，再去修车铺。
+  {
+    // 先下车（否则开车撞不进目标点也行，但步行更稳）。
+    await page.keyboard.press('KeyE');
+    await sleep(400);
+    const before = await state();
+    await page.evaluate(() => window.__game.teleport(175, 1125));
+    await sleep(700);
+    const mid = await state();
+    await page.evaluate(() => window.__game.teleport(1500, 620));
+    await sleep(700);
+    const after = await state();
+    check('M1 completes and pays $150', after.missionIndex === 1 && after.money === before.money + 150,
+      `mission ${mid.missionIndex}→${after.missionIndex}, $${before.money}→$${after.money}`);
+  }
+
+  // 11. P 暂停 / 再按恢复。
+  {
+    await page.keyboard.press('KeyP');
+    await sleep(400);
+    const paused = await state();
+    await page.keyboard.press('KeyP');
+    await sleep(400);
+    const resumed = await state();
+    check('pause and resume with P', paused.mode === 'paused' && resumed.mode === 'play',
+      `${paused.mode} → ${resumed.mode}`);
+  }
+
+  // 12. 自动存档写 localStorage。
+  {
+    await page.evaluate(() => window.__game.save());
+    await sleep(300);
+    const s = await state();
+    check('autosave writes localStorage', s.saveExists === true);
+  }
+
+  // 13. HUD 齐全：金钱、血条、通缉星、小地图、车速框（开车时）/ 提示。
+  {
+    const hud = await page.evaluate(() => ({
+      money: document.getElementById('hud-money').textContent,
+      stars: document.getElementById('wanted-stars').textContent,
+      minimap: !!document.getElementById('minimap'),
+      hint: document.getElementById('hint').textContent.length > 10,
+      banner: document.getElementById('banner').textContent,
+    }));
+    check('HUD complete', hud.money.startsWith('$') && hud.stars.length === 5 && hud.minimap && hud.hint,
+      `money=${hud.money} banner="${hud.banner}"`);
+  }
+
+  // 14. M 静音切换，SOUND 按钮文字跟着变。
+  {
+    await page.keyboard.press('KeyM');
+    await sleep(400);
+    const mutedText = await page.textContent('#sound-btn');
+    await page.keyboard.press('KeyM');
+    await sleep(400);
+    const onText = await page.textContent('#sound-btn');
+    check('mute toggle with M', mutedText.includes('MUTED') && onText.includes('SOUND'),
+      `"${mutedText}" → "${onText}"`);
+  }
+
+  // 15. 重载后标题画面显示 Continue（有存档）。
+  {
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction(() => window.__game && window.__game.world, null, { timeout: 15000 });
+    await sleep(600);
+    const hasContinue = await page.$('#overlay-buttons button[data-act="continue"]') !== null;
+    check('reload shows Continue', hasContinue);
+    // 点 Continue 回到游戏，保证存档能读。
+    if (hasContinue) {
+      await page.click('#overlay-buttons button[data-act="continue"]');
+      await sleep(500);
+      const s = await state();
+      check('continue resumes play', s.mode === 'play', `mode=${s.mode}`);
+    } else {
+      check('continue resumes play', false, 'no continue button');
+    }
+  }
+
+  // 16. 全程无 console 报错、无 failed request。
+  {
+    check('no console errors or failed requests',
+      consoleErrors.length === 0 && failedRequests.length === 0,
+      `console: ${consoleErrors.slice(0, 2).join(' | ') || 'none'}; failed: ${failedRequests.slice(0, 2).join(' | ') || 'none'}`);
+  }
+
+  await browser.close();
 } finally {
-  if (browser) await browser.close();
+  if (browser) await browser.close().catch(() => {});
   server.kill();
 }
+
+const failed = results.filter((r) => !r.ok);
+console.log(`\n${results.length - failed.length}/${results.length} passed`);
+process.exit(failed.length ? 1 : 0);

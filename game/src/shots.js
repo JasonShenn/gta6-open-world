@@ -1,69 +1,109 @@
-// shots.js — 确定性截图布景：?shot=<名>&seed=<数> 时按固定剧本摆好场景，
-// 供 tests/shots.mjs 渲染 4 张 1280×720 截图。布景全是玩法画面，无标题菜单。
-import { startMission } from './missions.js';
-import { addWanted } from './player.js';
+// shots.js — 四张截图的确定性布景：?shot=<名>&seed=7 时摆好场景、相机与状态。
+// 全是玩法画面，没有标题菜单；种子固定，同一命令每次出同一张图。
 
-// 每张图的固定布景（与 shots.json 的 query 对应）。
-export function applyShot(S, name) {
-  const p = S.player, sp = S.city.spots;
-  S.shotMode = true;
-  if (name === 'chase') {
-    // 封面：橙色跑车 + 2 辆警车 + 3 星 + 任务目标 + 高车速（市中心高楼段）。
-    p.car = { x: 2820, y: 1000, angle: Math.PI / 2, speed: 460, type: 'sports', parked: false };
-    S.owned.push(p.car);
-    p.x = p.car.x; p.y = p.car.y;
-    S.wanted = 3;
-    S.police = [
-      { x: 2798, y: 900, angle: Math.PI / 2, speed: 420, flash: true },
-      { x: 2842, y: 1160, angle: -Math.PI / 2, speed: 420, flash: false },
-    ];
-    S.mission = { id: 'M2', stage: 1 };
-    S.banner = { title: 'M2 — SUNSET STEAL', sub: 'Lose the cops — deliver the convertible to the Chop Shop.', t: 30 };
-    S.money = 1250; S.garage = ['sports'];
-    // 附近再摆几辆车流（全部压在车道上，不进街区），显出追逐密度。
-    S.traffic.cars[0] = { type: 'sedan', x: 2798, y: 1240, angle: Math.PI / 2, speed: 160, vertical: true, road: 2820, dir: 1 };
-    S.traffic.cars[1] = { type: 'taxi', x: 3050, y: 902, angle: 0, speed: 150, vertical: false, road: 880, dir: 1 };
-    S.traffic.cars[2] = { type: 'van', x: 2600, y: 902, angle: 0, speed: 140, vertical: false, road: 880, dir: 1 };
-  } else if (name === 'pier') {
-    // 码头步行：玩家站在码头木栈道上，大变焦，玩家约 36px。
-    p.x = 250; p.y = 1570; p.aim = -Math.PI / 2; p.car = null;
-    S.zoom = 2.1;
-    startMission(S, 'M1');
-    S.toasts = []; // 只留横幅，不叠重复提示
-    S.banner = { title: 'M1 — FIRST JOB', sub: 'Pick up the package at the Marina Pier.', t: 30 };
-    S.money = 210;
-    // 码头上两个散步的行人。
-    S.traffic.peds[0] = { x: 330, y: 1600, angle: Math.PI, speed: 0, color: '#c96f5a', vertical: false, t: 5 };
-    S.traffic.peds[1] = { x: 140, y: 1540, angle: 0, speed: 0, color: '#5f8f7a', vertical: false, t: 5 };
-  } else if (name === 'shootout') {
-    // 码头枪战：玩家持枪 + 3 名枪手 + 枪口火光 + 2 星 + 开枪提示。
-    p.x = 430; p.y = 1620; p.aim = Math.PI; p.car = null; p.ammo = 18;
-    S.zoom = 2.1;
-    startMission(S, 'M3');
-    S.enemies = S.enemies.filter(e => e.hp > 0).slice(0, 3);
-    S.enemies[0].x = 300; S.enemies[0].y = 1520;
-    if (S.enemies[1]) { S.enemies[1].x = 330; S.enemies[1].y = 1640; }
-    if (S.enemies[2]) { S.enemies[2].x = 180; S.enemies[2].y = 1600; }
-    S.wanted = 2;
-    S.muzzle = 30; // 截图瞬间保持火光
-    S.banner = { title: 'M3 — PIER SHOOTOUT', sub: 'Shooting raised the heat — take the cash bag!', t: 30 };
-    S.toasts = [{ text: 'Gunfire spotted — wanted level 2!', t: 30 }]; // 只留这一条提示
-    S.money = 860;
-  } else if (name === 'downtown') {
-    // 大道驾驶：市中心高楼 + 密集车流 + 送货任务 + 车速。
-    p.car = { x: 3420, y: 1000, angle: Math.PI / 2, speed: 370, type: 'sedan', parked: false };
-    S.owned.push(p.car);
-    p.x = p.car.x; p.y = p.car.y;
-    S.mission = { id: 'M1', stage: 1 };
-    S.banner = { title: 'M1 — FIRST JOB', sub: "Deliver the package to Mara's Garage.", t: 30 };
-    S.money = 480; S.garage = ['sedan'];
-    // 大道上摆满车流（全部压在 3420 大道车道上）。
-    const spots = [[3398, 820, 1], [3442, 1180, -1], [3398, 700, 1], [3442, 900, -1], [3398, 1150, 1], [3442, 760, -1]];
-    spots.forEach(([x, y, d], i) => {
-      S.traffic.cars[i] = { type: ['sedan', 'taxi', 'van', 'pickup', 'sports', 'sedan'][i], x, y, angle: d > 0 ? Math.PI / 2 : -Math.PI / 2, speed: 150, vertical: true, road: 3420, dir: d };
-    });
+import { CAR_TYPES } from './config.js';
+import { startMission } from './missions.js';
+import { setWanted } from './police.js';
+import { toast } from './game.js';
+
+// 一辆停好的车：直接放进世界并交给玩家（或停在画面里）。
+function placeCar(world, type, color, x, y, angle) {
+  const car = {
+    x, y, angle, speed: 0, type, color,
+    driver: 'none', parked: false,
+  };
+  world.traffic.cars.push(car);
+  return car;
+}
+
+// 把玩家放进一辆车并设定车速（km/h 仪表盘换算：px/s ÷ 1.55）。
+function driveCar(world, car, kmh) {
+  world.player.inCar = car;
+  car.driver = 'player';
+  world.player.speed = kmh * 1.55;
+  world.player.x = car.x;
+  world.player.y = car.y;
+  world.cam.x = car.x;
+  world.cam.y = car.y;
+  world.cam.zoom = 1.35;
+}
+
+// 步行站位：玩家在某点，相机居中，步行变焦 2.1×。
+function standAt(world, x, y, angle) {
+  world.player.inCar = null;
+  world.player.speed = 0;
+  world.player.x = x;
+  world.player.y = y;
+  world.player.angle = angle;
+  world.cam.x = x;
+  world.cam.y = y;
+  world.cam.zoom = 2.1;
+}
+
+export function stageShot(world, name) {
+  const p = world.player;
+  // 先清掉 startGame 留下的 M1 toast，免得它飘在截图中央（还盖霓虹）。
+  // 3-shootout 会在自己的分支里重新发一条 toast，不受影响。
+  const toastEl = document.getElementById('toast');
+  if (toastEl) toastEl.style.opacity = '0';
+  world.toastTimer = 0;
+  if (name === '1-chase') {
+    // 封面：橙色跑车 + 两辆警车一前一后 + 3 星 + 高速 + M2 任务。
+    startMission(world.missions, 1, world);
+    world.missions.stage = 1; // 已偷到车，正在送 Chop Shop
+    world.missions.bannerTimer = 0; // 不挡画面中央
+    const car = placeCar(world, 'convertible', '#ff8c1a', 1500, 950, Math.PI / 2);
+    driveCar(world, car, 207);
+    world.shotSpeedKmh = 207;
+    // 警车：一辆紧贴在后，一辆在前方路口。
+    const cop1 = placeCar(world, 'police', '#2e6fd8', 1500, 1130, Math.PI / 2);
+    cop1.driver = 'police';
+    const cop2 = placeCar(world, 'police', '#2e6fd8', 1500, 760, -Math.PI / 2);
+    cop2.driver = 'police';
+    world.police.cars = [cop1, cop2];
+    setWanted(world.police, 3);
+    world.police.heat = 40;
+    p.money = 1250;
+    world.missions.garage = ['sedan'];
+    world.targetPos = { x: 2500, y: 2080 };
+  } else if (name === '2-pier') {
+    // 码头步行：玩家红夹克 + 金圈站在木码头上，游艇、棕榈、目标金环都在。
+    // 站位离取包点 75px（目标半径 70），不会一开局就触发过关；相机以玩家为中心，游艇正在画面上沿。
+    startMission(world.missions, 0, world);
+    world.missions.bannerTimer = 0;
+    standAt(world, 250, 1130, -Math.PI / 2);
+    p.money = 210;
+    world.targetPos = { x: 175, y: 1125 };
+  } else if (name === '3-shootout') {
+    // 码头枪战：玩家带大星形枪口火光，3 名枪手同尺寸、头顶血条。
+    startMission(world.missions, 2, world);
+    world.missions.bannerTimer = 0;
+    standAt(world, 175, 1125, Math.PI / 2);
+    // 瞄准最近的枪手，枪口火光常亮（截图瞬间正好在开火）。
+    p.angle = Math.atan2(1170 - 1125, 250 - 175);
+    p.muzzle = 10; // 截图期间一直亮
+    p.fireCooldown = 0;
+    p.money = 860;
+    p.ammo = 18;
+    setWanted(world.police, 2);
+    toast(world, 'Gunfire spotted — wanted level 2!');
+    world.targetPos = { x: 175, y: 1125 };
+  } else if (name === '4-downtown') {
+    // 大道驾驶：白色轿车穿过市中心，塔楼霓虹在画面上部（PIER 9 在横幅下方、任务卡已隐藏，不被遮），车流密集。
+    startMission(world.missions, 0, world);
+    world.missions.stage = 1; // 送货去修车铺
+    world.missions.bannerTimer = 0;
+    const car = placeCar(world, 'sedan', '#e8e4da', 1900, 950, -Math.PI / 2);
+    driveCar(world, car, 167);
+    world.shotSpeedKmh = 167;
+    p.money = 480;
+    world.missions.garage = ['sedan'];
+    world.targetPos = { x: 1500, y: 660 };
+    // 画面里再加几辆车流，显得拥挤。
+    placeCar(world, 'taxi', '#ffd21f', 1900, 1420, Math.PI / 2);
+    placeCar(world, 'sports', '#ff7a1a', 1900, 1080, -Math.PI / 2);
+    placeCar(world, 'van', '#7fb3d5', 2300, 1150, 0);
   }
-  // 截图模式：全部定格布景（不推进世界，构图与车速保持设定值）。
-  S.freezeWorld = true;
-  void addWanted;
+  // 截图时不自动存档、不跑任务计时干扰：把 M4 计时之外的状态钉住。
+  world.saveTimer = -9999;
 }

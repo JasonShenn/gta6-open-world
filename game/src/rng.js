@@ -1,4 +1,6 @@
-// rng.js — 确定性随机数：mulberry32。截图布景与城市生成共用，保证同 seed 同画面。
+// rng.js — 可播种的伪随机数（mulberry32），截图布景用固定种子保证每次画面一致。
+
+// 由一个整数种子造一台随机数发生器：同样的种子永远吐出同样的数列。
 export function makeRng(seed) {
   let a = seed >>> 0;
   return function next() {
@@ -8,9 +10,18 @@ export function makeRng(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-// 在 [min, max) 均匀取数
-export function range(rng, min, max) { return min + rng() * (max - min); }
-// 从数组里随机挑一个
-export function pick(rng, arr) { return arr[Math.floor(rng() * arr.length)]; }
-// 整数随机 [min, max]
-export function int(rng, min, max) { return min + Math.floor(rng() * (max - min + 1)); }
+
+// 在 [min, max) 之间取一个随机数。
+export function range(rng, min, max) {
+  return min + rng() * (max - min);
+}
+
+// 从数组里随机挑一个。
+export function pick(rng, arr) {
+  return arr[Math.floor(rng() * arr.length)];
+}
+
+// 随机取一个整数（含 min，不含 max）。
+export function int(rng, min, max) {
+  return min + Math.floor(rng() * (max - min));
+}

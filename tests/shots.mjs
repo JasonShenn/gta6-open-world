@@ -1,54 +1,55 @@
-// tests/shots.mjs — 渲染 4 张确定性截图：1280×720 JPEG、各 ≤256 KiB。
-// 用 Playwright Chromium（swiftshader），服务由本脚本在 8129 端口拉起（8123 是用户 HA 隧道，绝不用）。
+// shots.mjs — 截图：按 shots.json 的 4 个布景各拍一张 1280×720 JPEG。
+// 跑法：node tests/shots.mjs（自动起 serve.ts 8130 端口，写进 screenshots/）。
+
 import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
-import { statSync, existsSync } from 'node:fs';
-import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, mkdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 
-const SHOTS = JSON.parse(readFileSync(new URL('../shots.json', import.meta.url), 'utf8'));
-const CHROME = process.env.CHROME_PATH || `${process.env.HOME}/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome`;
-const PORT = 8129;
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, '..');
+const PORT = 8130;
+const shots = JSON.parse(readFileSync(join(repo, 'shots.json'), 'utf8'));
 
-function waitForServer(url, tries = 40) {
-  return new Promise((resolve, reject) => {
-    const tick = async () => {
-      try { const r = await fetch(url); if (r.ok) return resolve(); } catch {}
-      if (--tries <= 0) return reject(new Error('server did not start'));
-      setTimeout(tick, 250);
-    };
-    tick();
-  });
+function findChrome() {
+  const base = join(homedir(), '.cache', 'ms-playwright');
+  if (!existsSync(base)) return undefined;
+  for (const d of readdirSync(base)) {
+    if (!d.startsWith('chromium-')) continue;
+    for (const sub of ['chrome-linux64/chrome', 'chrome-linux/chrome', 'chrome-mac/Chromium.app/Contents/MacOS/Chromium']) {
+      const p = join(base, d, sub);
+      if (existsSync(p)) return p;
+    }
+  }
+  return undefined;
 }
 
-const server = spawn('node', ['serve.ts', '--port', String(PORT)], { cwd: new URL('..', import.meta.url).pathname, stdio: 'ignore' });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const server = spawn('node', ['serve.ts', '--port', String(PORT)], { cwd: repo, stdio: 'ignore' });
+
 try {
-  await waitForServer(`http://127.0.0.1:${PORT}/index.html`);
+  await sleep(1200);
   const browser = await chromium.launch({
-    executablePath: CHROME,
-    args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox', '--disable-gpu-sandbox'],
+    executablePath: findChrome(),
+    args: ['--no-sandbox', '--disable-gpu-sandbox', '--use-gl=swiftshader'],
   });
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
-  page.on('console', m => { if (m.type() === 'error') console.log('[console.error]', m.text()); });
-  page.on('pageerror', e => console.log('[pageerror]', e.message));
-  let fail = false;
-  for (const s of SHOTS) {
-    const out = new URL(`../screenshots/${s.name}`, import.meta.url).pathname;
-    await page.goto(`http://127.0.0.1:${PORT}/index.html${s.query}`, { waitUntil: 'networkidle' });
-    await page.waitForTimeout(1500); // 等布景定格、警灯闪一轮
-    let quality = 82;
-    await page.screenshot({ path: out, type: 'jpeg', quality });
-    let size = statSync(out).size;
-    if (size > 262144) { // 超 256 KiB 就降画质重拍
-      quality = 68;
-      await page.screenshot({ path: out, type: 'jpeg', quality });
-      size = statSync(out).size;
-    }
-    console.log(`${s.name}: ${size} bytes (quality ${quality}) ${size <= 262144 ? 'OK' : 'OVER LIMIT'}`);
-    if (size > 262144) fail = true;
+  page.on('pageerror', (e) => console.log('PAGE ERROR:', String(e)));
+  mkdirSync(join(repo, 'screenshots'), { recursive: true });
+  for (const shot of shots) {
+    await page.goto(`http://127.0.0.1:${PORT}/${shot.query}`, { waitUntil: 'load' });
+    await page.waitForFunction(() => window.__game && window.__game.world.shotReady, null, { timeout: 15000 });
+    await sleep(1500); // 让相机、火光、警车就位
+    const file = join(repo, 'screenshots', shot.name);
+    await page.screenshot({ path: file, type: 'jpeg', quality: 88 });
+    const size = statSync(file).size;
+    console.log(`${shot.name}: ${size} bytes ${size <= 262144 ? 'OK' : 'TOO BIG'}`);
+    if (size > 262144) process.exitCode = 1;
   }
   await browser.close();
-  if (fail) process.exit(1);
-  console.log('shots: all 4 within 256 KiB');
 } finally {
   server.kill();
 }
+console.log('shots done');

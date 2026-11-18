@@ -1,20 +1,4 @@
-# dependencies
 node_modules/
-
-# build / submission output
 out/
-dist/
-
-# logs
-*.log
-
-# OS files
 .DS_Store
-Thumbs.db
-
-# editor
-.vscode/
-.idea/
-
-# environment
-.env
+*.log
