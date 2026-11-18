@@ -1,175 +1,164 @@
-// GOLDEN TIDE — player.js
-// One job: Cole "Cash" Vega — walking, driving, stealing cars, shooting.
-// Movement, car physics, entering/exiting, bullets and damage live here.
+// player.js — 玩家：步行/驾驶物理、上下车与偷车、射击、受伤与拾取。
+import { CAR_TYPES, PLAYER } from './config.js';
+import { cityCollides } from './city.js';
 
-import { CAR_TYPES, WORLD, ZOOM } from './config.js';
-import { isRoad } from './city.js';
-
-export function makePlayer() {
-  return {
-    x: 1300, y: 2900, angle: -Math.PI / 2, speed: 0, onFoot: true,
-    car: null, health: 100, ammo: 24, aimAngle: 0, shootCd: 0,
-    walkPhase: 0, lastCrimeAt: -999, garage: [], // distinct car types collected
-  };
+// 步行更新：WASD 移动（Shift 跑），撞墙则沿墙滑行。
+export function updateOnFoot(S, input, dt) {
+  const p = S.player;
+  let mx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  let my = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+  if (mx || my) {
+    const len = Math.hypot(mx, my); mx /= len; my /= len;
+    const sp = input.run ? PLAYER.runSpeed : PLAYER.walkSpeed;
+    p.moving = true;
+    p.angle = Math.atan2(my, mx);
+    const nx = p.x + mx * sp * dt, ny = p.y + my * sp * dt;
+    if (!cityCollides(S.city, nx, p.y, PLAYER.radius)) p.x = nx;
+    if (!cityCollides(S.city, p.x, ny, PLAYER.radius)) p.y = ny;
+  } else p.moving = false;
+  // 瞄准方向：鼠标在屏幕上的位置换算成世界方向。
+  if (input.mouseActive) p.aim = Math.atan2(input.mouseWY - p.y, input.mouseWX - p.x);
+  else if (p.moving) p.aim = p.angle;
 }
 
-export function makeCar(type, x, y, angle, opts) {
-  const t = CAR_TYPES[type];
-  return {
-    id: 'c' + Math.random().toString(36).slice(2, 8),
-    type, name: t.name, color: (opts && opts.color) || t.color,
-    x, y, angle: angle || 0, speed: 0,
-    len: t.len, wid: t.wid, top: t.top, accel: t.accel, grip: t.grip,
-    npc: !!(opts && opts.npc), police: type === 'police', owned: !!(opts && opts.owned),
-    siren: 0, health: 100,
-  };
-}
-
-// Nearest drivable car within reach of the player (on foot or in a car).
-export function nearestCar(world, maxDist) {
-  const p = world.player; let best = null, bestD = maxDist;
-  for (const c of world.cars) {
-    if (c.police && c.chasing) continue;
-    const d = Math.hypot(c.x - p.x, c.y - p.y);
-    if (d < bestD) { bestD = d; best = c; }
+// 驾驶更新：W 前进/S 刹车倒车，A/D 转向（速度越快转向越稳），撞楼减速。
+export function updateDriving(S, input, dt) {
+  const p = S.player, car = p.car;
+  const def = CAR_TYPES[car.type];
+  const fwd = (input.up ? 1 : 0) - (input.down ? 0.7 : 0);
+  car.speed += fwd * def.accel * dt;
+  car.speed -= car.speed * 0.55 * dt; // 阻力
+  if (Math.abs(car.speed) > def.top) car.speed = Math.sign(car.speed) * def.top;
+  if (Math.abs(car.speed) > 12) {
+    const steer = ((input.left ? 1 : 0) - (input.right ? 1 : 0)) * def.turn * dt * Math.sign(car.speed);
+    car.angle += steer * Math.min(1, Math.abs(car.speed) / 140);
   }
-  return best;
+  const nx = car.x + Math.cos(car.angle) * car.speed * dt;
+  const ny = car.y + Math.sin(car.angle) * car.speed * dt;
+  if (cityCollides(S.city, nx, ny, 16)) {
+    if (Math.abs(car.speed) > 120) { S.sfx.crash(); S.shake = 6; }
+    car.speed *= -0.25; // 撞墙反弹减速
+  } else { car.x = nx; car.y = ny; }
+  p.x = car.x; p.y = car.y; p.angle = car.angle;
+  // 出界拉回
+  car.x = Math.max(170, Math.min(5180, car.x));
+  car.y = Math.max(20, Math.min(3780, car.y));
 }
 
-export function updatePlayer(world, input, dt) {
-  const p = world.player;
-  p.shootCd = Math.max(0, p.shootCd - dt);
-  // Aim follows the mouse in world space (mouse is in screen space: un-zoom it).
-  const wx = world.camera.x + input.mouse.x / ZOOM, wy = world.camera.y + input.mouse.y / ZOOM;
-  p.aimAngle = Math.atan2(wy - p.y, wx - p.x);
+// E 键：附近有车则上车（停着的车=偷，通缉+2）；在车上则下车。
+export function tryEnterExitCar(S) {
+  const p = S.player;
+  if (p.car) {
+    const car = p.car; p.car = null;
+    p.x = car.x + Math.cos(car.angle + Math.PI / 2) * 26;
+    p.y = car.y + Math.sin(car.angle + Math.PI / 2) * 26;
+    if (!S.cars.includes(car)) S.cars.push(car); // 下车后车留在原地，可再上
+    S.toast('You got out.');
+    return;
+  }
+  let best = null, bd = 70;
+  for (const c of S.cars) {
+    const d = Math.hypot(c.x - p.x, c.y - p.y);
+    if (d < bd) { bd = d; best = c; }
+  }
+  if (!best) return;
+  p.car = best;
+  if (best.parked) {
+    best.parked = false;
+    S.cars = S.cars.filter(c => c !== best);
+    S.owned.push(best);
+    addWanted(S, 2, 'Car stolen — wanted level 2!');
+    S.toast('Stolen! The cops are coming.');
+    if (CAR_TYPES[best.type].collect && !S.garage.includes(best.type)) {
+      S.garage.push(best.type);
+      S.toast(`New ride for the garage: ${CAR_TYPES[best.type].name} (${S.garage.length}/5)`);
+    }
+  } else {
+    S.toast(`Driving the ${CAR_TYPES[best.type].name}.`);
+  }
+}
 
-  if (p.onFoot) updateOnFoot(world, input, dt);
-  else updateDriving(world, input, dt);
+// 通缉等级变化（上限 5），到 2 星以上刷出警车。
+export function addWanted(S, n, msg) {
+  const before = S.wanted;
+  S.wanted = Math.min(5, S.wanted + n);
+  if (msg) S.toast(msg);
+  if (S.wanted >= 2 && before < 2) S.policeTimer = 0; // 立即开始刷警车
+}
 
-  // E: get in / out of a car, or steal the nearest one.
-  if (input.hit('e')) {
-    if (p.onFoot) {
-      const car = nearestCar(world, 64);
-      if (car) {
-        const wasParked = !car.npc && !car.owned;
-        p.car = car; p.onFoot = false; p.x = car.x; p.y = car.y;
-        if (!car.owned && !car.npc) {
-          car.owned = true; world.wanted.heat += 1.2; p.lastCrimeAt = world.time;
-          world.sounds.crash();
-          world.toast('Car stolen! The cops are coming.', '#ff9a5c');
-          if (!p.garage.includes(car.type)) p.garage.push(car.type);
-        } else if (car.npc) {
-          car.npc = false; world.wanted.heat += 1.0; p.lastCrimeAt = world.time;
-          world.toast('You jacked a ' + car.name + '! Wanted level up.', '#ff9a5c');
-          if (!p.garage.includes(car.type)) p.garage.push(car.type);
+// 开枪：朝鼠标方向发射，耗 1 发弹药，涨 1 星热度（封顶到 2 星以内不叠加刷屏）。
+export function shoot(S, input) {
+  const p = S.player;
+  if (p.ammo <= 0) { S.toast('Out of ammo — press R to restock ($20).'); return; }
+  if (S.shootCd > 0) return;
+  S.shootCd = 0.22;
+  p.ammo--;
+  const a = input.mouseActive ? Math.atan2(input.mouseWY - p.y, input.mouseWX - p.x) : p.aim;
+  S.bullets.push({ x: p.x + Math.cos(a) * 22, y: p.y + Math.sin(a) * 22, vx: Math.cos(a) * 900, vy: Math.sin(a) * 900, from: 'player', life: 0.7 });
+  S.muzzle = 0.09; // 枪口火光持续 0.09 秒
+  S.sfx.shot();
+  if (S.wanted < 2) addWanted(S, 1, 'Gunfire spotted — wanted level 2!');
+}
+
+// 子弹更新：命中敌人/玩家/建筑，溅出火花粒子。
+export function updateBullets(S, dt) {
+  for (const b of S.bullets) {
+    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+    if (b.from === 'player') {
+      for (const e of S.enemies) {
+        if (e.hp > 0 && Math.hypot(e.x - b.x, e.y - b.y) < 16) {
+          e.hp -= 34; b.life = 0;
+          S.particles.push({ x: b.x, y: b.y, vx: 0, vy: 0, life: 0.3, max: 0.3, color: '#ff5a3a', r: 5 });
+          if (e.hp <= 0) { S.toast('Crew member down!'); S.money += 25; }
+          break;
         }
-        world.sounds.pickup();
       }
     } else {
-      const car = p.car; p.car = null; p.onFoot = true;
-      p.x = car.x + Math.cos(car.angle + Math.PI / 2) * 30;
-      p.y = car.y + Math.sin(car.angle + Math.PI / 2) * 30;
-      p.angle = car.angle; p.speed = 0;
-    }
-  }
-
-  // Shoot: mouse click or Space, on foot or leaning out of the car.
-  if ((input.mouse.clicked || input.down(' ')) && p.shootCd <= 0 && p.ammo > 0) {
-    p.shootCd = 0.28; p.ammo -= 1;
-    const bx = p.x + Math.cos(p.aimAngle) * 26, by = p.y + Math.sin(p.aimAngle) * 26;
-    world.bullets.push({ x: bx, y: by, vx: Math.cos(p.aimAngle) * 900, vy: Math.sin(p.aimAngle) * 900, life: 0.6, fromPlayer: true });
-    world.particles.push({ x: bx, y: by, vx: 0, vy: 0, life: 0.1, max: 0.1, size: 9, color: '#ffd34d', kind: 'flash' });
-    world.sounds.shoot();
-    world.wanted.heat += 0.9; p.lastCrimeAt = world.time;
-  }
-  if (input.hit('r') && p.ammo < 6) { p.ammo = 24; world.toast('Ammo restocked.', '#7be382'); }
-}
-
-function updateOnFoot(world, input, dt) {
-  const p = world.player;
-  let mx = 0, my = 0;
-  if (input.down('w', 'arrowup')) my -= 1;
-  if (input.down('s', 'arrowdown')) my += 1;
-  if (input.down('a', 'arrowleft')) mx -= 1;
-  if (input.down('d', 'arrowright')) mx += 1;
-  const moving = mx !== 0 || my !== 0;
-  const run = input.down('shift') ? 1.6 : 1;
-  const sp = 175 * run;
-  if (moving) {
-    const len = Math.hypot(mx, my);
-    p.x += (mx / len) * sp * dt; p.y += (my / len) * sp * dt;
-    p.angle = Math.atan2(my, mx); p.walkPhase += dt * 11;
-  }
-  p.x = Math.max(30, Math.min(WORLD.w - 30, p.x));
-  p.y = Math.max(30, Math.min(WORLD.h - 30, p.y));
-  // Buildings block walking: push out of any overlapping facade.
-  for (const b of world.city.buildings) {
-    if (p.x > b.x - 8 && p.x < b.x + b.w + 8 && p.y > b.y - 8 && p.y < b.y + b.h + 8) {
-      const dxl = p.x - (b.x - 8), dxr = (b.x + b.w + 8) - p.x;
-      const dyt = p.y - (b.y - 8), dyb = (b.y + b.h + 8) - p.y;
-      const m = Math.min(dxl, dxr, dyt, dyb);
-      if (m === dxl) p.x = b.x - 8; else if (m === dxr) p.x = b.x + b.w + 8;
-      else if (m === dyt) p.y = b.y - 8; else p.y = b.y + b.h + 8;
-    }
-  }
-}
-
-function updateDriving(world, input, dt) {
-  const p = world.player; const c = p.car;
-  const t = CAR_TYPES[c.type];
-  let throttle = 0;
-  if (input.down('w', 'arrowup')) throttle = 1;
-  if (input.down('s', 'arrowdown')) throttle = -0.6;
-  const steer = (input.down('a', 'arrowleft') ? -1 : 0) + (input.down('d', 'arrowright') ? 1 : 0);
-  const offroad = isRoad(c.x, c.y) ? 1 : 0.55; // sand and grass slow the car
-  c.speed += throttle * c.accel * offroad * dt;
-  c.speed -= c.speed * 0.55 * dt; // rolling drag
-  if (input.down(' ')) c.speed *= Math.max(0, 1 - dt * 2.2); // handbrake
-  c.speed = Math.max(-t.top * 0.45, Math.min(t.top * offroad, c.speed));
-  const turnRate = steer * c.grip * 0.9 * Math.min(1, Math.abs(c.speed) / 140) * (c.speed < 0 ? -1 : 1);
-  c.angle += turnRate * dt;
-  c.x += Math.cos(c.angle) * c.speed * dt;
-  c.y += Math.sin(c.angle) * c.speed * dt;
-  p.x = c.x; p.y = c.y; p.angle = c.angle;
-  // World edges and building collisions: bounce off with a thud.
-  if (c.x < 250) { c.x = 250; c.speed *= -0.3; world.sounds.crash(); }
-  if (c.x > WORLD.w - 40) { c.x = WORLD.w - 40; c.speed *= -0.3; world.sounds.crash(); }
-  if (c.y < 40) { c.y = 40; c.speed *= -0.3; world.sounds.crash(); }
-  if (c.y > WORLD.h - 40) { c.y = WORLD.h - 40; c.speed *= -0.3; world.sounds.crash(); }
-  for (const b of world.city.buildings) {
-    if (c.x > b.x - 12 && c.x < b.x + b.w + 12 && c.y > b.y - 12 && c.y < b.y + b.h + 12) {
-      c.speed *= -0.35; c.x -= Math.cos(c.angle) * 18; c.y -= Math.sin(c.angle) * 18;
-      if (Math.abs(c.speed) > 60) world.sounds.crash();
-    }
-  }
-  // Bumping traffic cars: both slow down, sparks fly.
-  for (const o of world.traffic.cars) {
-    if (Math.abs(o.x - c.x) < 44 && Math.abs(o.y - c.y) < 34 && Math.abs(c.speed) > 40) {
-      o.stopped = 0.6; c.speed *= 0.55;
-      world.particles.push({ x: c.x, y: c.y, vx: 0, vy: 0, life: 0.25, max: 0.25, size: 10, color: '#ffd34d', kind: 'flash' });
-      world.sounds.crash();
-    }
-  }
-  if (Math.abs(c.speed) > 30) world.sounds.update(Math.abs(c.speed) / t.top, world.wanted.stars);
-}
-
-// Player bullets and gunman bullets: move, hit gunmen / the player, fade.
-export function updateBullets(world, dt) {
-  for (const b of world.bullets) {
-    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
-    if (b.fromPlayer) {
-      for (const g of world.gunmen) {
-        if (!g.dead && Math.hypot(g.x - b.x, g.y - b.y) < 18) {
-          g.hp -= 34; b.life = 0;
-          world.particles.push({ x: b.x, y: b.y, vx: 0, vy: 0, life: 0.2, max: 0.2, size: 8, color: '#ff5f5f', kind: 'flash' });
-          if (g.hp <= 0) { g.dead = true; world.money += 25; world.toast('Crew member down — +$25', '#7be382'); }
-        }
+      const p = S.player;
+      if (Math.hypot(p.x - b.x, p.y - b.y) < 13) {
+        p.hp -= 8; b.life = 0;
+        S.particles.push({ x: b.x, y: b.y, vx: 0, vy: 0, life: 0.3, max: 0.3, color: '#ff5a3a', r: 5 });
       }
-    } else if (Math.hypot(world.player.x - b.x, world.player.y - b.y) < 16) {
-      world.player.health -= 6; b.life = 0;
-      world.particles.push({ x: b.x, y: b.y, vx: 0, vy: 0, life: 0.2, max: 0.2, size: 8, color: '#ff5f5f', kind: 'flash' });
-      if (world.player.health <= 0) world.player.health = 0;
     }
+    if (cityCollides(S.city, b.x, b.y, 2)) b.life = 0;
   }
-  world.bullets = world.bullets.filter((b) => b.life > 0);
+  S.bullets = S.bullets.filter(b => b.life > 0);
+  for (const pt of S.particles) { pt.life -= dt; pt.x += pt.vx * dt; pt.y += pt.vy * dt; }
+  S.particles = S.particles.filter(pt => pt.life > 0);
+}
+
+// 画步行玩家：约 17 世界单位高（步行 2.1× 变焦下约 36px），红夹克 + 手枪 + 金圈。
+export function drawPlayer(ctx, S) {
+  const p = S.player;
+  if (p.car) return;
+  const bob = p.moving ? Math.sin(S.time * 14) * 2 : 0;
+  ctx.save(); ctx.translate(p.x, p.y);
+  // 长影朝东
+  ctx.fillStyle = 'rgba(58,32,12,0.4)';
+  ctx.beginPath(); ctx.ellipse(10, 6, 12, 7, 0, 0, 6.29); ctx.fill();
+  // 金圈（玩家标记）
+  ctx.strokeStyle = 'rgba(255,210,90,0.9)'; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.arc(0, 0, 17, 0, 6.29); ctx.stroke();
+  // 身体朝向瞄准方向
+  ctx.rotate(p.aim);
+  ctx.fillStyle = '#d83a2e'; ctx.beginPath(); ctx.roundRect(-7, -8, 15, 16, 5); ctx.fill(); // 红夹克
+  ctx.fillStyle = '#2a2118'; ctx.beginPath(); ctx.arc(4, 0, 6, 0, 6.29); ctx.fill();          // 头
+  ctx.fillStyle = '#f2c230'; ctx.beginPath(); ctx.arc(4, -2, 2, 0, 6.29); ctx.fill();         // 金发
+  // 手枪（看得见的枪管）
+  ctx.fillStyle = '#1c1c22'; ctx.fillRect(8, -2, 13, 4);
+  ctx.fillStyle = '#3a3a44'; ctx.fillRect(8, -2, 13, 1.5);
+  // 枪口火光：大而亮的星形
+  if (S.muzzle > 0) {
+    ctx.fillStyle = 'rgba(255,220,90,0.95)';
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const a = i * Math.PI / 4, r = i % 2 ? 6 : 17;
+      ctx.lineTo(21 + Math.cos(a) * r, Math.sin(a) * r);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,150,40,0.7)';
+    ctx.beginPath(); ctx.arc(21, 0, 8, 0, 6.29); ctx.fill();
+  }
+  ctx.restore();
+  void bob;
 }

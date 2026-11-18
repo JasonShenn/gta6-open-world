@@ -1,38 +1,54 @@
-// GOLDEN TIDE — tests/shots.mjs
-// One job: render the four screenshots with Playwright — real renders of the
-// game's own code, never drawn by hand — and check each fits the gate
-// (1280x720 JPEG, at most 256 KiB). Run: node tests/shots.mjs
+// tests/shots.mjs — 渲染 4 张确定性截图：1280×720 JPEG、各 ≤256 KiB。
+// 用 Playwright Chromium（swiftshader），服务由本脚本在 8129 端口拉起（8123 是用户 HA 隧道，绝不用）。
+import { chromium } from 'playwright-core';
+import { spawn } from 'node:child_process';
+import { statSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 
-import { writeFileSync, statSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { startServer, launch, BASE } from './helpers.mjs';
-import { ROOT } from './helpers.mjs';
+const SHOTS = JSON.parse(readFileSync(new URL('../shots.json', import.meta.url), 'utf8'));
+const CHROME = process.env.CHROME_PATH || `${process.env.HOME}/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome`;
+const PORT = 8129;
 
-const SHOTS = [
-  { name: '1-chase.jpg', query: '?shot=chase&seed=7' },
-  { name: '2-pier.jpg', query: '?shot=pier&seed=7' },
-  { name: '3-shootout.jpg', query: '?shot=shootout&seed=7' },
-  { name: '4-downtown.jpg', query: '?shot=downtown&seed=7' },
-];
+function waitForServer(url, tries = 40) {
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      try { const r = await fetch(url); if (r.ok) return resolve(); } catch {}
+      if (--tries <= 0) return reject(new Error('server did not start'));
+      setTimeout(tick, 250);
+    };
+    tick();
+  });
+}
 
-const server = await startServer();
-const { browser, page } = await launch();
+const server = spawn('node', ['serve.ts', '--port', String(PORT)], { cwd: new URL('..', import.meta.url).pathname, stdio: 'ignore' });
 try {
-  for (const shot of SHOTS) {
-    await page.goto(BASE + '/index.html' + shot.query, { waitUntil: 'networkidle' });
-    await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 8000 });
-    await page.waitForTimeout(400); // let the frozen frame settle
-    const file = join(ROOT, 'screenshots', shot.name);
-    await page.screenshot({ path: file, type: 'jpeg', quality: 82 });
-    const size = statSync(file).size;
-    const header = readFileSync(file).subarray(0, 3);
-    const isJpeg = header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
-    console.log(shot.name + ': ' + (size / 1024).toFixed(1) + ' KiB, JPEG=' + isJpeg);
-    if (size > 262144) throw new Error(shot.name + ' is over the 256 KiB gate');
-    if (!isJpeg) throw new Error(shot.name + ' is not a JPEG');
+  await waitForServer(`http://127.0.0.1:${PORT}/index.html`);
+  const browser = await chromium.launch({
+    executablePath: CHROME,
+    args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox', '--disable-gpu-sandbox'],
+  });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  page.on('console', m => { if (m.type() === 'error') console.log('[console.error]', m.text()); });
+  page.on('pageerror', e => console.log('[pageerror]', e.message));
+  let fail = false;
+  for (const s of SHOTS) {
+    const out = new URL(`../screenshots/${s.name}`, import.meta.url).pathname;
+    await page.goto(`http://127.0.0.1:${PORT}/index.html${s.query}`, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(1500); // 等布景定格、警灯闪一轮
+    let quality = 82;
+    await page.screenshot({ path: out, type: 'jpeg', quality });
+    let size = statSync(out).size;
+    if (size > 262144) { // 超 256 KiB 就降画质重拍
+      quality = 68;
+      await page.screenshot({ path: out, type: 'jpeg', quality });
+      size = statSync(out).size;
+    }
+    console.log(`${s.name}: ${size} bytes (quality ${quality}) ${size <= 262144 ? 'OK' : 'OVER LIMIT'}`);
+    if (size > 262144) fail = true;
   }
-  console.log('SHOTS DONE — 4 real renders, all within the gate');
-} finally {
   await browser.close();
+  if (fail) process.exit(1);
+  console.log('shots: all 4 within 256 KiB');
+} finally {
   server.kill();
 }

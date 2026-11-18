@@ -1,114 +1,87 @@
-// GOLDEN TIDE — police.js
-// One job: the wanted system — heat rises with crime, stars follow, police
-// cruisers chase and ram, roadblocks appear at 3 stars, and getting caught
-// on foot with a cruiser on top of you means BUSTED.
+// police.js — 警察：按通缉等级刷出、追捕撞击、包抄、3 星起路障、被捕判定。
+import { AVENUES, STREETS } from './city.js';
+import { CAR_TYPES } from './config.js';
+import { makeRng, range, pick } from './rng.js';
 
-import { WORLD, AVENUES, STREETS } from './config.js';
-import { makeCar } from './player.js';
-import { nearestRoadPoint } from './city.js';
+// 目标警车数：1 星 1 辆，2 星 2 辆，3 星 3 辆，4 星 4 辆，5 星 5 辆。
+export function wantedPoliceCount(wanted) { return wanted <= 0 ? 0 : Math.min(5, wanted); }
 
-export function makeWanted() {
-  return { heat: 0, stars: 0, quietFor: 0, arrest: 0 };
+// 在玩家附近的道路上刷一辆警车。
+function spawnPolice(S) {
+  const rng = S.rng;
+  const vertical = rng() < 0.5;
+  let x, y;
+  if (vertical) { x = pick(rng, AVENUES) + (rng() < 0.5 ? -22 : 22); y = S.player.y + range(rng, -700, 700); }
+  else { y = pick(rng, STREETS) + (rng() < 0.5 ? -22 : 22); x = S.player.x + range(rng, -700, 700); }
+  x = Math.max(320, Math.min(5150, x)); y = Math.max(40, Math.min(3750, y));
+  S.police.push({ x, y, angle: 0, speed: 0, flash: rng() < 0.5 });
 }
-
-function starCount(heat) {
-  if (heat < 0.5) return 0;
-  if (heat < 1.6) return 1;
-  if (heat < 3.0) return 2;
-  if (heat < 4.6) return 3;
-  if (heat < 6.2) return 4;
-  return 5;
-}
-
-export function updateWanted(world, dt) {
-  const w = world.wanted; const p = world.player;
-  // Heat cools off when the player stays clean for a while.
-  if (world.time - p.lastCrimeAt > 18) { w.heat = Math.max(0, w.heat - dt * 0.12); w.quietFor += dt; }
-  else w.quietFor = 0;
-  const stars = starCount(w.heat);
-  if (stars !== w.stars) {
-    w.stars = stars;
-    if (stars >= 3) world.toast('WANTED LEVEL ' + stars + ' — roadblocks ahead!', '#ff5f5f');
-    else if (stars > 0) world.toast('Wanted level ' + stars + ' — police responding.', '#ff9a5c');
+export function updatePolice(S, dt) {
+  const p = S.player;
+  const want = wantedPoliceCount(S.wanted);
+  // 通缉为 0 时警车逐渐撤离；有通缉时补足数量。
+  S.policeTimer -= dt;
+  if (S.wanted > 0 && S.police.length < want && S.policeTimer <= 0) {
+    spawnPolice(S);
+    S.policeTimer = 1.2;
   }
-  updatePolice(world, dt);
-}
-
-function updatePolice(world, dt) {
-  const w = world.wanted; const p = world.player;
-  const wantCount = w.stars === 0 ? 0 : Math.min(2 + w.stars, 7);
-  // Spawn cruisers on nearby roads until the wanted level is matched.
-  while (world.police.length < wantCount) {
-    const spot = nearestRoadPoint(
-      p.x + (Math.random() < 0.5 ? -1 : 1) * (500 + Math.random() * 400),
-      p.y + (Math.random() < 0.5 ? -1 : 1) * (500 + Math.random() * 400), null);
-    const car = makeCar('police', Math.max(280, Math.min(WORLD.w - 60, spot.x)), Math.max(60, Math.min(WORLD.h - 60, spot.y)), 0);
-    car.chasing = true; car.siren = Math.random() * 6;
-    world.police.push(car); world.cars.push(car);
+  if (S.wanted === 0 && S.police.length > 0 && S.policeTimer <= 0) {
+    S.police.pop(); S.policeTimer = 2;
   }
-  // Despawn the surplus when the heat drops.
-  while (world.police.length > wantCount) {
-    const gone = world.police.pop();
-    world.cars = world.cars.filter((c) => c !== gone);
-  }
-  for (const c of world.police) {
-    c.siren += dt;
+  for (const c of S.police) {
+    // 追捕：朝玩家加速，带一点包抄偏移（左右夹击）。
     const dx = p.x - c.x, dy = p.y - c.y;
     const dist = Math.hypot(dx, dy) || 1;
-    const wantAngle = Math.atan2(dy, dx);
-    // Chase with a little weaving so cruisers do not all stack on one line.
-    const weave = Math.sin(world.time * 1.7 + c.siren) * 0.35;
-    let diff = wantAngle + weave - c.angle;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    c.angle += Math.max(-2.6 * dt, Math.min(2.6 * dt, diff));
-    const top = 300 + w.stars * 34;
-    c.speed += ((dist > 260 ? top : top * 0.85) - c.speed) * Math.min(1, dt * 0.9);
+    const flank = c.flank ?? (c.flank = (S.rng() < 0.5 ? -1 : 1) * 120);
+    const tx = p.x + -dy / dist * flank * 0.4, ty = p.y + dx / dist * flank * 0.4;
+    const wantAngle = Math.atan2(ty - c.y, tx - c.x);
+    let da = wantAngle - c.angle;
+    while (da > Math.PI) da -= 2 * Math.PI;
+    while (da < -Math.PI) da += 2 * Math.PI;
+    c.angle += Math.max(-3.2 * dt, Math.min(3.2 * dt, da));
+    const top = 470 + S.wanted * 22;
+    c.speed = Math.min(top, c.speed + 420 * dt);
     c.x += Math.cos(c.angle) * c.speed * dt;
     c.y += Math.sin(c.angle) * c.speed * dt;
-    // Ramming the player car slows it and shakes the camera.
-    if (p.car && Math.hypot(p.car.x - c.x, p.car.y - c.y) < 52) {
-      p.car.speed *= Math.max(0.4, 1 - dt * 1.4);
-      c.speed *= 0.9;
-      if (Math.abs(p.car.speed) > 80 && Math.random() < dt * 2) world.sounds.crash();
+    c.flash = !c.flash;
+    // 撞到玩家：步行扣血 / 开车撞击减速 + 震屏。
+    if (dist < 34) {
+      if (p.car) { p.car.speed *= 0.55; S.shake = 7; S.sfx.crash(); }
+      else if (S.hurtCd <= 0) { p.hp -= 12; S.hurtCd = 0.8; S.sfx.crash(); S.shake = 6; }
+      c.speed *= 0.4;
     }
-    // On foot and a cruiser right on top of you: arrest meter fills.
-    if (p.onFoot && dist < 46) {
-      w.arrest += dt * 0.8;
-      if (w.arrest >= 1) { bustPlayer(world); return; }
-    } else w.arrest = Math.max(0, w.arrest - dt * 0.5);
-  }
-  // Roadblocks at 3+ stars: a line of cruisers across the road ahead of the player.
-  if (w.stars >= 3 && world.roadblocks.length < 2 && Math.random() < dt * 0.12) {
-    const ahead = { x: p.x + Math.cos(p.angle) * 700, y: p.y + Math.sin(p.angle) * 700 };
-    const spot = nearestRoadPoint(ahead.x, ahead.y, null);
-    const block = [];
-    for (let i = -1; i <= 1; i++) {
-      const car = makeCar('police', spot.x + i * 52, spot.y, Math.PI / 2);
-      car.block = true; block.push(car); world.cars.push(car);
+    // 警车之间互相推开，避免叠在一起。
+    for (const o of S.police) {
+      if (o === c) continue;
+      const ddx = c.x - o.x, ddy = c.y - o.y, dd = Math.hypot(ddx, ddy);
+      if (dd > 0 && dd < 40) { c.x += ddx / dd * 30 * dt; c.y += ddy / dd * 30 * dt; }
     }
-    world.roadblocks.push({ cars: block, x: spot.x, y: spot.y, life: 40 });
   }
-  for (const rb of world.roadblocks) rb.life -= dt;
-  world.roadblocks = world.roadblocks.filter((rb) => {
-    if (rb.life > 0) return true;
-    for (const c of rb.cars) world.cars = world.cars.filter((x) => x !== c);
-    return false;
-  });
+  // 3 星起路障：两辆警车横在玩家前方道路上。
+  if (S.wanted >= 3 && S.roadblocks.length === 0) {
+    const ahead = p.car ? p.angle : p.aim;
+    const bx = p.x + Math.cos(ahead) * 420, by = p.y + Math.sin(ahead) * 420;
+    S.roadblocks.push({ x: bx, y: by, angle: ahead + Math.PI / 2 });
+    S.toast('Roadblock ahead!');
+  }
+  if (S.wanted < 3) S.roadblocks = [];
+  S.hurtCd = Math.max(0, (S.hurtCd || 0) - dt);
+  // 被捕：步行且血量耗尽，或被警车贴身困住。
+  if (!p.car && p.hp <= 0 && !S.over) {
+    S.over = 'busted';
+    S.toast('BUSTED!');
+  }
 }
-
-function bustPlayer(world) {
-  const p = world.player;
-  world.mode = 'busted';
-  const fine = Math.min(100, world.money);
-  world.money -= fine;
-  world.wanted.heat = 0; world.wanted.stars = 0; world.wanted.arrest = 0;
-  world.police.forEach((c) => { world.cars = world.cars.filter((x) => x !== c); });
-  world.police = [];
-  world.roadblocks.forEach((rb) => rb.cars.forEach((c) => { world.cars = world.cars.filter((x) => x !== c); }));
-  world.roadblocks = [];
-  p.health = 100; p.ammo = 24;
-  p.onFoot = true; p.car = null; p.x = 1300; p.y = 2900;
-  world.sounds.busted();
-  world.bustedFine = fine;
+// 画警车（红蓝闪灯）与路障（横停的警车 + 路锥）。
+import { drawCar } from './traffic.js';
+export function drawPolice(ctx, S) {
+  for (const c of S.police) drawCar(ctx, c.x, c.y, c.angle, 'sedan', { police: true, flash: c.flash });
+  for (const r of S.roadblocks) {
+    drawCar(ctx, r.x, r.y, r.angle, 'sedan', { police: true, flash: true });
+    ctx.fillStyle = '#ff7a1a';
+    for (let i = -2; i <= 2; i++) {
+      const cx = r.x + Math.cos(r.angle) * i * 46, cy = r.y + Math.sin(r.angle) * i * 46;
+      ctx.beginPath(); ctx.moveTo(cx, cy - 8); ctx.lineTo(cx + 7, cy + 6); ctx.lineTo(cx - 7, cy + 6); ctx.closePath(); ctx.fill();
+    }
+  }
 }

@@ -1,30 +1,45 @@
-// GOLDEN TIDE — input.js
-// One job: keyboard and mouse state. WASD/arrows to move and drive, E to enter
-// or steal a car, Space or click to shoot, P pause, M mute, R restart a run.
-
-export class Input {
-  constructor(canvas) {
-    this.keys = {};
-    this.mouse = { x: 0, y: 0, down: false, clicked: false };
-    this.pressed = {}; // keys pressed since last frame (edge-triggered)
-    window.addEventListener('keydown', (e) => {
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) e.preventDefault();
-      if (!this.keys[e.key.toLowerCase()]) this.pressed[e.key.toLowerCase()] = true;
-      this.keys[e.key.toLowerCase()] = true;
-    });
-    window.addEventListener('keyup', (e) => { this.keys[e.key.toLowerCase()] = false; });
-    canvas.addEventListener('mousemove', (e) => {
-      const r = canvas.getBoundingClientRect();
-      this.mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
-      this.mouse.y = (e.clientY - r.top) * (canvas.height / r.height);
-    });
-    canvas.addEventListener('mousedown', (e) => { this.mouse.down = true; this.mouse.clicked = true; });
-    window.addEventListener('mouseup', () => { this.mouse.down = false; });
-    window.addEventListener('blur', () => { this.keys = {}; this.mouse.down = false; });
+// input.js — 键盘 + 鼠标输入：WASD/方向键、Shift 跑、E 上下车、Space/点击开枪、
+// R 补弹药、P 暂停、M 静音。鼠标屏幕坐标换算成世界坐标供瞄准用。
+export function makeInput(canvas, S) {
+  const input = {
+    up: false, down: false, left: false, right: false, run: false,
+    mouseX: 640, mouseY: 360, mouseWX: 0, mouseWY: 0, mouseActive: false,
+  };
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    if (e.repeat) return;
+    keys[e.code] = true;
+    sync();
+    if (e.code === 'KeyE') S.queueEnter = true;
+    if (e.code === 'KeyP') S.queuePause = true;
+    if (e.code === 'KeyM') S.queueMute = true;
+    if (e.code === 'KeyR') S.queueRestock = true;
+    if (e.code === 'Space') { input.shootHeld = true; e.preventDefault(); }
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+  });
+  window.addEventListener('keyup', e => { keys[e.code] = false; sync(); if (e.code === 'Space') input.shootHeld = false; });
+  function sync() {
+    input.up = keys.KeyW || keys.ArrowUp || false;
+    input.down = keys.KeyS || keys.ArrowDown || false;
+    input.left = keys.KeyA || keys.ArrowLeft || false;
+    input.right = keys.KeyD || keys.ArrowRight || false;
+    input.run = keys.ShiftLeft || keys.ShiftRight || false;
   }
-
-  down(...names) { return names.some((n) => this.keys[n]); }
-  hit(...names) { return names.some((n) => this.pressed[n]); }
-  // Call at the end of each frame so edge triggers fire exactly once.
-  endFrame() { this.pressed = {}; this.mouse.clicked = false; }
+  canvas.addEventListener('mousemove', e => {
+    const r = canvas.getBoundingClientRect();
+    input.mouseX = (e.clientX - r.left) * (1280 / r.width);
+    input.mouseY = (e.clientY - r.top) * (720 / r.height);
+    input.mouseActive = true;
+    updateWorld();
+  });
+  canvas.addEventListener('mousedown', e => {
+    if (e.button === 0) { input.shootHeld = true; input.mouseActive = true; updateWorld(); S.sfx.ensure(); }
+  });
+  window.addEventListener('mouseup', () => { input.shootHeld = false; });
+  function updateWorld() {
+    input.mouseWX = S.cam.x + input.mouseX / S.zoom;
+    input.mouseWY = S.cam.y + input.mouseY / S.zoom;
+  }
+  input.updateWorld = updateWorld;
+  return input;
 }

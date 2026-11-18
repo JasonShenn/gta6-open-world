@@ -1,90 +1,53 @@
-// GOLDEN TIDE — config.js
-// One job: every constant, colour and tuning number for the game, in one place.
-// The golden-hour palette lives here so the whole city shares one sunset.
+// config.js — GOLDEN TIDE 全局常量：世界尺寸、配色、车型、任务文案。
+// 全部数值集中在这里，调数值只改这一个文件。
+export const WORLD = { w: 5200, h: 3800 }; // 世界宽高（世界单位）
 
-export const WORLD = { w: 5200, h: 3800 }; // world size in pixels
-export const VIEW = { w: 1280, h: 720 }; // play viewport the screenshots use
-export const ZOOM = 1.35; // camera zoom: the city reads bigger, cars read as cars
-
-// Golden-hour palette: warm sun, long shadows, sea green and coral walls.
-export const PAL = {
-  grass: '#8fae5a', grassDry: '#b5a05e', sand: '#e8cf9a', sandWet: '#d9b878',
-  sea: '#1e7f8e', seaDeep: '#14606e', seaSpark: '#ffe9a8',
-  road: '#4a4642', roadEdge: '#6b655e', sidewalk: '#c9b18c', dash: '#f2d38a',
-  shadow: 'rgba(60,30,10,0.30)', // long sunset shadow colour
-  cream: '#f2e3c2', coral: '#e8876b', teal: '#5fb8a6', terracotta: '#c67b4e',
-  glass: '#3f7ea6', glassHi: '#9fd4e8', palm: '#3f7d44', palmDark: '#2c5c31',
-  roof: '#8a6a4a', neonPink: '#ff5fa2', neonCyan: '#39e6ff', neonGold: '#ffd34d',
-  gold: '#ffd34d', money: '#7be382', police: '#2b4fd8', policeLight: '#ff3b30',
-  hud: 'rgba(20,14,8,0.72)', hudEdge: 'rgba(255,211,77,0.55)',
+// 金色黄昏配色：暖地面、暖道路、暖窗光，夕阳在西边（左），影子朝东拉长。
+export const PALETTE = {
+  grass: '#b3a45c', grassDark: '#a3934e', grassLight: '#c2b26a',
+  road: '#6e5b52', roadEdge: '#8a6f5c', lane: '#f2d38a', sidewalk: '#d9b98a',
+  sand: '#eac98f', water: '#2f7f8c', waterDeep: '#256b78', pierWood: '#a97e4f',
+  roofCream: '#f2e3c2', roofCoral: '#e8826a', roofTeal: '#5fb3a4', roofTerra: '#c96f3f',
+  roofGlass: '#4f7fa8', roofPink: '#e8a7a0', roofWhite: '#efe8d8',
+  windowLit: '#ffd27a', windowDark: '#3d4a5c', neonPink: '#ff5fa2', neonCyan: '#37e0d8',
+  shadow: 'rgba(58,32,12,0.35)', // 长影颜色（半透明暖棕）
 };
+export const SUN = { dx: 1, dy: 0.32 }; // 夕阳光方向：自西向东，影子朝东偏南
 
-export const DISTRICTS = [
-  { id: 'marina', name: 'Marina & Pier', x0: 0, y0: 0, x1: 950, y1: 3800, tint: '#e8cf9a' },
-  { id: 'downtown', name: 'Downtown', x0: 1650, y0: 950, x1: 3350, y1: 2450, tint: '#3f7ea6' },
-  { id: 'oldtown', name: 'Old Town', x0: 1650, y0: 2450, x1: 3350, y1: 3800, tint: '#c67b4e' },
-  { id: 'beach', name: 'South Beach', x0: 950, y0: 2950, x1: 5200, y1: 3800, tint: '#e8cf9a' },
-  { id: 'industrial', name: 'East Docks', x0: 4050, y0: 0, x1: 5200, y1: 2950, tint: '#8a8a86' },
-  { id: 'residential', name: 'Palm Heights', x0: 950, y0: 0, x1: 4050, y1: 950, tint: '#8fae5a' },
-];
-
-// Avenue / street centre lines. Roads are 96 px wide, sidewalks hug them.
-export const AVENUES = [420, 1020, 1620, 2220, 2820, 3420, 4020, 4620];
-export const STREETS = [420, 920, 1420, 1920, 2420, 2920, 3420];
-export const ROAD_W = 96;
-
-// Car types the player can steal and drive. topSpeed in px/s.
+// 6 种可偷车型：速度（世界单位/秒）、加速、转向、颜色、车库是否收藏。
 export const CAR_TYPES = {
-  sedan: { name: 'Sedan', color: '#d8d3c8', top: 330, accel: 210, grip: 3.4, len: 46, wid: 22 },
-  sports: { name: 'Sunset Sports', color: '#ff7a1a', top: 470, accel: 300, grip: 4.2, len: 48, wid: 22 },
-  taxi: { name: 'Taxi Cab', color: '#ffc81e', top: 340, accel: 220, grip: 3.5, len: 46, wid: 22 },
-  van: { name: 'Getaway Van', color: '#7a8a99', top: 300, accel: 180, grip: 3.0, len: 56, wid: 26 },
-  police: { name: 'Police Cruiser', color: '#2b4fd8', top: 430, accel: 280, grip: 4.0, len: 48, wid: 23 },
-  truck: { name: 'Dock Truck', color: '#b8573f', top: 280, accel: 160, grip: 2.8, len: 60, wid: 26 },
+  sedan:  { name: 'SEDAN',    top: 430, accel: 300, turn: 2.6, len: 46, wid: 22, color: '#d8d3c8', collect: true },
+  taxi:   { name: 'TAXI',     top: 420, accel: 290, turn: 2.6, len: 46, wid: 22, color: '#f2c230', collect: true },
+  sports: { name: 'SUNSET SPORTS', top: 560, accel: 420, turn: 3.1, len: 48, wid: 21, color: '#ff7a1a', collect: true },
+  van:    { name: 'VAN',      top: 380, accel: 240, turn: 2.2, len: 54, wid: 24, color: '#7fb3d8', collect: true },
+  pickup: { name: 'PICKUP',   top: 440, accel: 320, turn: 2.5, len: 50, wid: 23, color: '#c65a4a', collect: true },
+  truck:  { name: 'DOCK TRUCK', top: 360, accel: 210, turn: 2.0, len: 62, wid: 26, color: '#8a9a5b', collect: false },
 };
+export const GARAGE_TARGET = 5; // 车库收藏目标（5 种可收藏车型）
+export const CASH_STASHES = 5;  // 隐藏现金点数量
 
-// Mission script: Cole "Cash" Vega runs jobs for Mara at the beach garage.
-export const MISSIONS = [
-  {
-    id: 'm1', code: 'M1', title: 'FIRST JOB',
-    brief: 'Mara needs a package off the pier. Grab it, bring it to her garage.',
-    stages: [
-      { text: 'Pick up the package at the Marina Pier', target: { x: 300, y: 1750, r: 70 } },
-      { text: 'Deliver the package to Mara\u2019s Garage', target: { x: 1300, y: 3050, r: 90 } },
-    ],
-    reward: 150,
-  },
-  {
-    id: 'm2', code: 'M2', title: 'SUNSET STEAL',
-    brief: 'A sunset-orange convertible is parked at the marina. Steal it, lose the cops, drop it at the chop shop.',
-    stages: [
-      { text: 'Steal the orange convertible at the marina', target: { x: 560, y: 2100, r: 80 } },
-      { text: 'Deliver the convertible to the Chop Shop (East Docks)', target: { x: 4400, y: 1200, r: 100 } },
-    ],
-    reward: 400,
-  },
-  {
-    id: 'm3', code: 'M3', title: 'PIER SHOOTOUT',
-    brief: 'The pier crew is holding Mara\u2019s cash. Take it back — guns out, cops will come.',
-    stages: [
-      { text: 'Fight the pier crew and grab the cash bag', target: { x: 330, y: 2350, r: 110 } },
-      { text: 'Escape the pier — lose the heat, reach the garage', target: { x: 1300, y: 3050, r: 110 } },
-    ],
-    reward: 600,
-  },
-  {
-    id: 'm4', code: 'M4', title: 'AIRPORT RUN',
-    brief: 'Last job. Drive the getaway van through the roadblocks to Palmera Airport before the timer runs out.',
-    stages: [
-      { text: 'Get in the getaway van at the garage', target: { x: 1300, y: 3050, r: 90 } },
-      { text: 'Reach Palmera Airport — beat the clock!', target: { x: 4900, y: 500, r: 120 } },
-    ],
-    reward: 1200, timeLimit: 180,
-  },
-];
-
-export const CASH_SPOTS = 5; // hidden cash stashes around the city, $50 each
-export const TAXI_FARE_MIN = 40;
-export const TAXI_FARE_MAX = 80;
-export const START_MONEY = 60;
-export const SAVE_KEY = 'golden-tide-save-v1';
+// 剧情任务文案（M1→M4 依次解锁）。
+export const MISSIONS = {
+  M1: { id: 'M1', code: 'M1 · FIRST JOB', title: 'FIRST JOB', pay: 150,
+        brief: 'Pick up the package at the Marina Pier.',
+        step2: "Deliver the package to Mara's Garage.",
+        banner: 'Mara needs a package from the pier. Go get it, Cash.' },
+  M2: { id: 'M2', code: 'M2 · SUNSET STEAL', title: 'SUNSET STEAL', pay: 250,
+        brief: 'Steal the orange convertible at the marina.',
+        step2: 'Lose the cops — deliver the convertible to the Chop Shop (East Docks).',
+        banner: 'That orange convertible is yours. Lose the cops first.' },
+  M3: { id: 'M3', code: 'M3 · PIER SHOOTOUT', title: 'PIER SHOOTOUT', pay: 300,
+        brief: 'Fight the pier crew and grab the cash bag.',
+        step2: 'Shooting raised the heat — take the cash bag!',
+        banner: 'The pier crew is armed. Clear them out and grab the bag.' },
+  M4: { id: 'M4', code: 'M4 · AIRPORT RUN', title: 'AIRPORT RUN', pay: 500,
+        brief: 'Drive the getaway van through the roadblocks to Palmera Airport. 90 seconds!',
+        step2: 'Through the roadblocks — get to the airport!',
+        banner: 'Last job. Ninety seconds. Do not stop for anything.' },
+};
+export const PLAYER = {
+  walkSpeed: 175, runSpeed: 265, radius: 10,
+  hpMax: 100, ammoMax: 24, startMoney: 150,
+};
+export const WANTED_MAX = 5;
+export const SAVE_KEY = 'golden-tide-save-v3';

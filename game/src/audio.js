@@ -1,83 +1,76 @@
-// GOLDEN TIDE — audio.js
-// One job: every sound, synthesised with WebAudio — no audio files at all.
-// Engine hum follows speed, the siren wails while wanted, plus gun, crash,
-// pickup and cash blips. M toggles mute. Silent until the first key or click.
-
-export class SoundBank {
+// audio.js — 全合成 WebAudio 音效：无外部音频文件，全部现算。
+// 引擎声随车速变调、警笛双音交替、枪声噪声爆、拾取音、撞击闷响。M 键静音。
+export class Sfx {
   constructor() {
     this.ctx = null; this.master = null; this.muted = false;
-    this.engineOsc = null; this.engineGain = null; this.sirenOsc = null;
-    this.sirenGain = null; this.sirenTimer = 0;
+    this.engineOsc = null; this.engineGain = null; this.sirenTimer = 0; this.sirenHigh = false;
   }
-
-  // Create the context on first user gesture; browsers block audio before that.
+  // 第一次用户交互后调用：创建 AudioContext（浏览器要求手势后才能发声）。
   ensure() {
     if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
-      this.master.gain.value = 0.35;
+      this.master.gain.value = this.muted ? 0 : 0.5;
       this.master.connect(this.ctx.destination);
-      // Engine: low sawtooth whose pitch follows the car.
+      // 引擎：低频锯齿波 + 低通，音调跟车速走。
       this.engineOsc = this.ctx.createOscillator();
-      this.engineOsc.type = 'sawtooth'; this.engineOsc.frequency.value = 55;
-      this.engineGain = this.ctx.createGain(); this.engineGain.gain.value = 0;
-      const lp = this.ctx.createBiquadFilter();
-      lp.type = 'lowpass'; lp.frequency.value = 420;
-      this.engineOsc.connect(lp); lp.connect(this.engineGain); this.engineGain.connect(this.master);
+      this.engineOsc.type = 'sawtooth';
+      this.engineOsc.frequency.value = 55;
+      this.engineGain = this.ctx.createGain();
+      this.engineGain.gain.value = 0;
+      const filt = this.ctx.createBiquadFilter();
+      filt.type = 'lowpass'; filt.frequency.value = 420;
+      this.engineOsc.connect(filt); filt.connect(this.engineGain); this.engineGain.connect(this.master);
       this.engineOsc.start();
-      // Siren: triangle that slides between two notes.
-      this.sirenOsc = this.ctx.createOscillator();
-      this.sirenOsc.type = 'triangle'; this.sirenOsc.frequency.value = 700;
-      this.sirenGain = this.ctx.createGain(); this.sirenGain.gain.value = 0;
-      this.sirenOsc.connect(this.sirenGain); this.sirenGain.connect(this.master);
-      this.sirenOsc.start();
     } catch (e) { this.ctx = null; }
   }
-
-  toggleMute() { this.muted = !this.muted; if (this.master) this.master.gain.value = this.muted ? 0 : 0.35; return this.muted; }
-
-  // Call every frame: engine pitch from speed, siren on/off from wanted level.
-  update(speedRatio, wanted) {
-    if (!this.ctx || this.muted) return;
-    const t = this.ctx.currentTime;
-    this.engineGain.gain.setTargetAtTime(0.02 + speedRatio * 0.09, t, 0.1);
-    this.engineOsc.frequency.setTargetAtTime(52 + speedRatio * 130, t, 0.1);
-    this.sirenGain.gain.setTargetAtTime(wanted > 0 ? 0.05 : 0, t, 0.2);
+  setMuted(m) { this.muted = m; if (this.master) this.master.gain.value = m ? 0 : 0.5; }
+  // 每帧调用：引擎音量/音调跟车速，警笛按通缉等级响。
+  update(speedNorm, wanted, dt) {
+    if (!this.ctx) return;
+    if (this.engineOsc) {
+      this.engineOsc.frequency.value = 48 + speedNorm * 130;
+      this.engineGain.gain.value = speedNorm > 0.02 ? 0.05 + speedNorm * 0.06 : 0;
+    }
     if (wanted > 0) {
-      this.sirenTimer += 1;
-      this.sirenOsc.frequency.setTargetAtTime(this.sirenTimer % 60 < 30 ? 720 : 980, t, 0.05);
+      this.sirenTimer -= dt;
+      if (this.sirenTimer <= 0) {
+        this.sirenTimer = 0.42; this.sirenHigh = !this.sirenHigh;
+        this.blip(this.sirenHigh ? 880 : 620, 0.38, 0.05);
+      }
     }
   }
-
-  blip(freq, dur, type, vol) {
-    if (!this.ctx || this.muted) return;
+  // 短促正弦音（拾取/警笛/提示共用）。
+  blip(freq, dur, vol) {
+    if (!this.ctx) return;
     const t = this.ctx.currentTime;
-    const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
-    o.type = type || 'sine'; o.frequency.value = freq;
-    g.gain.setValueAtTime(vol || 0.2, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    o.connect(g); g.connect(this.master); o.start(t); o.stop(t + dur + 0.02);
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = 'sine'; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(this.master); o.start(t); o.stop(t + dur);
   }
-
-  // Short noise burst: gunshot or crash, louder and harsher for a crash.
-  noise(dur, vol, low) {
-    if (!this.ctx || this.muted) return;
-    const t = this.ctx.currentTime;
-    const len = Math.floor(this.ctx.sampleRate * dur);
+  pickup() { this.blip(880, 0.09, 0.12); setTimeout(() => this.blip(1318, 0.12, 0.12), 70); }
+  // 枪声：白噪声爆 + 低频冲击。
+  shot() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime, len = this.ctx.sampleRate * 0.12;
     const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = buf.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
     const src = this.ctx.createBufferSource(); src.buffer = buf;
-    const f = this.ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = low || 2400;
-    const g = this.ctx.createGain(); g.gain.value = vol;
+    const g = this.ctx.createGain(); g.gain.value = 0.25;
+    const f = this.ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 1800;
     src.connect(f); f.connect(g); g.connect(this.master); src.start(t);
   }
-
-  shoot() { this.noise(0.14, 0.5, 3200); this.blip(180, 0.08, 'square', 0.15); }
-  crash() { this.noise(0.25, 0.45, 700); }
-  pickup() { this.blip(660, 0.09, 'sine', 0.22); this.blip(990, 0.12, 'sine', 0.2); }
-  cash() { this.blip(880, 0.08, 'triangle', 0.25); this.blip(1320, 0.14, 'triangle', 0.22); }
-  busted() { this.blip(220, 0.4, 'sawtooth', 0.25); this.blip(165, 0.5, 'sawtooth', 0.22); }
-  missionDone() { [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => this.blip(f, 0.18, 'triangle', 0.22), i * 110)); }
+  // 撞击：低频正弦闷响。
+  crash() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(120, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.18);
+    g.gain.setValueAtTime(0.3, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+    o.connect(g); g.connect(this.master); o.start(t); o.stop(t + 0.22);
+  }
 }

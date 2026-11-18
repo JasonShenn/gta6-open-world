@@ -3,23 +3,95 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GOLDEN TIDE — a sun-soaked open-world crime game in Palmera</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23ffd34d'/%3E%3C/svg%3E">
+<link rel="icon" href="data:,">
+<title>GOLDEN TIDE — Palmera Open World</title>
 <style>
-  /* GOLDEN TIDE — index.html: one job, the page shell. Full-window dark stage,
-     a 1280x720 canvas centred, nothing loaded from the network. */
-  html, body { margin: 0; padding: 0; height: 100%; background: #17100a; overflow: hidden; }
-  body { display: flex; align-items: center; justify-content: center; }
-  #game {
-    width: min(100vw, calc(100vh * 16 / 9));
-    height: min(100vh, calc(100vw * 9 / 16));
-    display: block; background: #8fae5a; cursor: crosshair;
-    box-shadow: 0 0 60px rgba(255, 170, 60, 0.25);
-  }
+  /* 金色黄昏 HUD：深色玻璃卡片 + 金字，全部 DOM 覆盖在画布上 */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #1a1210; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+  #wrap { position: relative; width: 100vw; height: 100vh; }
+  canvas#game { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .card { position: absolute; background: rgba(20,14,10,0.82); border: 1px solid rgba(255,210,120,0.35);
+    border-radius: 10px; color: #f2e8d0; padding: 10px 14px; backdrop-filter: blur(2px); }
+  #hud-left { top: 12px; left: 12px; min-width: 210px; }
+  #hud-money { font-size: 28px; font-weight: 800; color: #7be495; line-height: 1; }
+  #hud-name { font-size: 12px; letter-spacing: 1px; margin-top: 4px; color: #ffd25a; }
+  #hud-hpbar { height: 8px; background: #3a2a22; border-radius: 4px; margin-top: 6px; overflow: hidden; }
+  #hud-hp { height: 100%; width: 100%; background: #7be495; border-radius: 4px; }
+  #hud-stats { font-size: 12px; margin-top: 5px; color: #e8dcc0; letter-spacing: 0.5px; }
+  #hud-objective { top: 12px; left: 50%; transform: translateX(-50%); font-size: 14px; font-weight: 600;
+    color: #ffd25a; white-space: nowrap; max-width: 46vw; overflow: hidden; text-overflow: ellipsis; }
+  #hud-wanted { top: 12px; right: 12px; font-size: 14px; font-weight: 700; text-align: right; }
+  #hud-wanted .stars { color: #ffd25a; font-size: 17px; letter-spacing: 2px; }
+  #minimap-wrap { top: 64px; right: 12px; padding: 4px; }
+  #minimap { display: block; width: 200px; height: 140px; border-radius: 6px; }
+  #hud-banner { top: 86px; left: 50%; transform: translateX(-50%); text-align: center; display: none;
+    background: rgba(20,14,10,0.78); padding: 12px 26px; }
+  #hud-banner-title { font-size: 22px; font-weight: 800; color: #ffd25a; letter-spacing: 1px; }
+  #hud-banner-sub { font-size: 13px; color: #f2e8d0; margin-top: 4px; }
+  #hud-toasts { position: absolute; top: 200px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 6px; pointer-events: none; }
+  .toast { background: rgba(20,14,10,0.85); border: 1px solid rgba(255,150,80,0.5); color: #ffb37a;
+    font-size: 14px; font-weight: 600; padding: 7px 16px; border-radius: 20px; white-space: nowrap; }
+  #hud-speedbox { bottom: 16px; right: 16px; text-align: right; display: none; }
+  #hud-carname { font-size: 12px; color: #ffd25a; letter-spacing: 1px; }
+  #hud-speed { font-size: 30px; font-weight: 800; color: #fff; line-height: 1; }
+  #hud-timer { top: 210px; right: 12px; font-size: 20px; font-weight: 800; color: #ff9a5a; display: none; }
+  #hud-hint { bottom: 12px; left: 12px; font-size: 12px; color: #d8cbb0; padding: 7px 12px; }
+  #hud-mute { bottom: 12px; right: 12px; font-size: 12px; color: #d8cbb0; padding: 7px 12px; }
+  #hud-pause, #hud-over { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    flex-direction: column; background: rgba(10,6,4,0.72); color: #f2e8d0; text-align: center; z-index: 5; }
+  #hud-pause h1, #hud-over-title { font-size: 44px; font-weight: 800; color: #ffd25a; letter-spacing: 3px; }
+  #hud-pause p, #hud-over-sub { font-size: 16px; margin-top: 10px; color: #e8dcc0; }
+  /* 标题画面：落日渐变 + 大标题 + 按钮 */
+  #title { position: absolute; inset: 0; z-index: 10; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center; color: #fff;
+    background: linear-gradient(180deg, rgba(255,150,50,0.25), rgba(120,40,90,0.55)), radial-gradient(circle at 18% 60%, rgba(255,190,80,0.5), transparent 55%); }
+  #title h1 { font-size: 84px; font-weight: 900; letter-spacing: 6px; color: #ffd25a;
+    text-shadow: 0 4px 0 #a34d12, 0 10px 30px rgba(0,0,0,0.6); }
+  #title h2 { font-size: 20px; letter-spacing: 4px; color: #ffe9c0; margin-top: 6px; }
+  #title p { max-width: 560px; font-size: 15px; line-height: 1.6; color: #f2e8d0; margin-top: 18px; }
+  #title .btns { margin-top: 26px; display: flex; gap: 14px; }
+  #title button { font-size: 18px; font-weight: 700; padding: 13px 30px; border-radius: 10px; cursor: pointer;
+    border: 2px solid #ffd25a; background: #ffb347; color: #3a1c05; }
+  #title button.ghost { background: transparent; color: #ffd25a; }
+  #btn-continue { display: none; }
+  #title .controls { margin-top: 22px; font-size: 13px; color: #d8cbb0; line-height: 1.8; }
 </style>
 </head>
 <body>
-<canvas id="game" width="1280" height="720"></canvas>
+<div id="wrap">
+  <canvas id="game" width="1280" height="720"></canvas>
+  <div id="hud-left" class="card">
+    <div id="hud-money">$150</div>
+    <div id="hud-name">COLE "CASH" VEGA</div>
+    <div id="hud-hpbar"><div id="hud-hp"></div></div>
+    <div id="hud-stats"><span id="hud-hptext">HP 100</span> · <span id="hud-ammo">AMMO 24</span> · <span id="hud-cash">CASH 0/5</span> · <span id="hud-garage">GARAGE 0/5</span></div>
+  </div>
+  <div id="hud-objective" class="card">M1 · FIRST JOB — Pick up the package at the Marina Pier</div>
+  <div id="hud-wanted" class="card">WANTED <span class="stars">☆☆☆☆☆</span></div>
+  <div id="minimap-wrap" class="card"><canvas id="minimap" width="200" height="140"></canvas></div>
+  <div id="hud-banner" class="card"><div id="hud-banner-title"></div><div id="hud-banner-sub"></div></div>
+  <div id="hud-toasts"></div>
+  <div id="hud-timer" class="card">⏱ 90s</div>
+  <div id="hud-speedbox" class="card"><div id="hud-carname">SEDAN</div><div id="hud-speed">0 km/h</div></div>
+  <div id="hud-hint" class="card">WASD drive / walk · E enter or steal car · Click / Space shoot · Shift run · P pause · M mute</div>
+  <div id="hud-mute" class="card">🔊 SOUND</div>
+  <div id="hud-pause"><h1>PAUSED</h1><p>Press P to keep playing, Cash.</p></div>
+  <div id="hud-over"><h1 id="hud-over-title">BUSTED!</h1><p id="hud-over-sub"></p></div>
+  <div id="title">
+    <h1>GOLDEN TIDE</h1>
+    <h2>PALMERA · A SUN-SOAKED OPEN WORLD</h2>
+    <p>You are Cole "Cash" Vega. Mara runs a beach garage and has jobs for you:
+       steal cars, outrun the Palmera PD, and take the city for yourself — one golden sunset at a time.</p>
+    <div class="btns">
+      <button id="btn-start">▶ NEW GAME</button>
+      <button id="btn-continue" class="ghost">CONTINUE</button>
+    </div>
+    <div class="controls">WASD / Arrows — walk or drive · E — enter / steal a car · Mouse / Space — shoot<br>
+    R — restock ammo ($20) · P — pause · M — mute · Progress saves automatically</div>
+  </div>
+</div>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

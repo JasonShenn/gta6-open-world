@@ -1,69 +1,33 @@
-// GOLDEN TIDE — main.js
-// One job: boot the game — canvas, the frame loop, title clicks, pause and
-// mute keys, and the ?shot=… staging hook the screenshot driver uses.
-
-import { Game } from './game.js';
-import { Input } from './input.js';
-import { renderWorld, renderHUD, renderOverlay } from './render.js';
+// main.js — 启动入口：建画布、建游戏、标题画面（开始/继续）、进游戏开 M1。
+import { createGame, startLoop, loadSave, applySave, bootFromUrl } from './game.js';
+import { startMission } from './missions.js';
 
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-const params = new URLSearchParams(window.location.search);
+const params = new URLSearchParams(location.search);
 const seed = Number(params.get('seed') || 7);
-const shot = params.get('shot');
+const S = createGame(canvas, seed);
+window.GT = S.debug; // 测试钩子：window.GT.state / .teleport / .setWanted 等
+window.GT.started = () => S.started;
 
-const game = new Game(seed);
-const input = new Input(canvas);
-window.GT = game; // play-test hook: the driver reads and steers the game here
+const titleEl = document.getElementById('title');
+const continueBtn = document.getElementById('btn-continue');
+const save = loadSave();
+if (save) continueBtn.style.display = 'inline-block';
 
-// Title screen: click starts a fresh run, or continues the saved one.
-canvas.addEventListener('mousedown', () => {
-  game.sounds.ensure();
-  if (game.mode === 'title') game.start(false);
-  else if (game.mode === 'busted' || game.mode === 'complete') game.resume();
+function begin(fresh) {
+  S.sfx.ensure();
+  titleEl.style.display = 'none';
+  S.started = true;
+  if (!fresh && save) { applySave(S, save); S.toast('Welcome back, Cash.'); }
+  else startMission(S, 'M1');
+  canvas.focus();
+}
+document.getElementById('btn-start').addEventListener('click', () => begin(true));
+continueBtn.addEventListener('click', () => begin(false));
+// 标题画面也支持回车开始。
+window.addEventListener('keydown', e => {
+  if (!S.started && e.code === 'Enter') begin(!!save ? false : true);
+  if (S.over && e.code === 'KeyR') location.reload();
 });
-
-let last = performance.now();
-let shotReady = false;
-
-function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000);
-  last = now;
-
-  // P pause, M mute — edge-triggered, checked before the update.
-  if (input.hit('p')) {
-    if (game.mode === 'play') game.mode = 'paused';
-    else if (game.mode === 'paused') game.mode = 'play';
-  }
-  if (input.hit('m')) {
-    const muted = game.sounds.toggleMute();
-    game.toast(muted ? 'Sound muted (M to unmute).' : 'Sound on.', '#ffe9a8');
-  }
-
-  game.update(input, dt);
-
-  // Camera shake: a few pixels of jitter while the car screams.
-  ctx.save();
-  if (game.shake > 0) ctx.translate((Math.random() - 0.5) * game.shake, (Math.random() - 0.5) * game.shake);
-  renderWorld(ctx, game);
-  ctx.restore();
-  if (game.mode !== 'title') renderHUD(ctx, game);
-  renderOverlay(ctx, game);
-  input.endFrame();
-
-  if (shot && !shotReady) {
-    shotReady = true;
-    window.__shotReady = true; // the screenshot driver waits for this flag
-  }
-  requestAnimationFrame(frame);
-}
-
-// Screenshot mode: stage the named scene, render it frozen, flag ready.
-if (shot) {
-  game.applyShot(shot);
-  // One warm-up render so fonts and the first frame settle, then the loop
-  // keeps drawing the same frozen frame (update() returns early when frozen).
-  renderWorld(ctx, game);
-  renderHUD(ctx, game);
-}
-requestAnimationFrame(frame);
+bootFromUrl(S);
+startLoop(S);
